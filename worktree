@@ -1,0 +1,473 @@
+#!/usr/bin/env sh
+#
+# bin/worktree — manage git worktrees with isolated dev services.
+#
+# Each worktree gets a unique "slot" N (primary checkout is slot 0) that
+# drives a non-colliding port set, so worktrees run their own Postgres +
+# Redis + Rails server at once: PORT = BASE + N * PORT_STRIDE. The slot is
+# the single source of truth, persisted as WORKTREE_SLOT in the worktree's
+# gitignored .env, which mise loads first so it overrides the defaults.
+#
+# Usage:
+#   bin/worktree add <slug> [<type>] [--no-start]   # type defaults to "feat"
+#   bin/worktree adopt [<path>] [--start]           # adopt an existing worktree
+#   bin/worktree list
+#   bin/worktree rm <slug|name|path|slot> [--delete-branch] [--force]
+#
+set -eu
+
+DB_PORT_BASE=5431
+REDIS_PORT_BASE=6379
+WEB_PORT_BASE=3000
+MAIL_SMTP_PORT_BASE=1025
+MAIL_UI_PORT_BASE=8025
+# Stride is wide enough that no slot lands on a well-known port (e.g. a
+# system Postgres on 5432): slot 1 -> +10, slot 2 -> +20, ...
+PORT_STRIDE=10
+
+# Echo a slot's five service ports, space-separated, in the fixed order
+# db redis web mail_smtp mail_ui. Single source for the slot->port math.
+ports_for_slot() {
+  slot=$1
+  printf '%s %s %s %s %s' \
+    "$((DB_PORT_BASE + slot * PORT_STRIDE))" \
+    "$((REDIS_PORT_BASE + slot * PORT_STRIDE))" \
+    "$((WEB_PORT_BASE + slot * PORT_STRIDE))" \
+    "$((MAIL_SMTP_PORT_BASE + slot * PORT_STRIDE))" \
+    "$((MAIL_UI_PORT_BASE + slot * PORT_STRIDE))"
+}
+
+# --- repo topology -----------------------------------------------------------
+# Primary working tree (holds the real .git dir) is the first `git worktree
+# list` entry; its basename is the repo name, its parent holds siblings.
+main_worktree() {
+  git worktree list --porcelain | awk '/^worktree /{print $2; exit}'
+}
+
+# Registered worktree paths, one per line.
+worktree_paths() {
+  git worktree list --porcelain | awk '/^worktree /{print $2}'
+}
+
+# The token `rm` accepts for a worktree: the add-slug (dir basename minus the
+# "<repo>-" prefix) or, for other worktrees (e.g. Claude isolation ones), the
+# bare dir basename. Empty for the primary checkout.
+slug_of_path() {
+  base=$(basename "$1")
+  [ "$1" = "$(main_worktree)" ] && return 0
+  repo=$(basename "$(main_worktree)")
+  case "$base" in
+    "$repo"-*) printf '%s' "${base#"$repo"-}" ;;
+    *) printf '%s' "$base" ;;
+  esac
+}
+
+# Echo the WORKTREE_SLOT recorded in a worktree's .env, or empty.
+slot_of_env() {
+  env_file="$1/.env"
+  [ -f "$env_file" ] || return 0
+  grep -E '^[[:space:]]*WORKTREE_SLOT[[:space:]]*=' "$env_file" 2>/dev/null \
+    | tail -n1 | cut -d= -f2 | sed "s/[[:space:]\"']//g"
+}
+
+# Slots currently in use across all worktrees. Primary == 0.
+used_slots() {
+  echo 0
+  worktree_paths | while read -r wt; do
+    s=$(slot_of_env "$wt")
+    [ -n "$s" ] && echo "$s"
+  done || true
+}
+
+next_free_slot() {
+  used=$(used_slots)
+  n=1
+  while echo "$used" | grep -qx "$n"; do
+    n=$((n + 1))
+  done
+  echo "$n"
+}
+
+# Resolve a slug | worktree dir name | path | slot number to a single
+# registered worktree path on stdout. Errors (with candidates) on miss or
+# ambiguity. This is what lets `rm` reach Claude isolation worktrees under
+# .claude/worktrees/<name>, which don't follow the $repo-$slug naming.
+resolve_worktree() {
+  arg=$1
+  rw_main=$(main_worktree)
+  rw_repo=$(basename "$rw_main")
+  rw_parent=$(dirname "$rw_main")
+  paths=$(worktree_paths)
+
+  # 1. A path (absolute or relative) that is itself a registered worktree.
+  if [ -d "$arg" ]; then
+    abs=$(cd "$arg" 2>/dev/null && pwd)
+    if [ -n "$abs" ] && echo "$paths" | grep -qx "$abs"; then
+      echo "$abs"; return 0
+    fi
+  fi
+
+  # 2. Legacy slug -> $repo-$slug sibling.
+  if echo "$paths" | grep -qx "$rw_parent/$rw_repo-$arg"; then
+    echo "$rw_parent/$rw_repo-$arg"; return 0
+  fi
+
+  # 3. Slot number -> the worktree whose .env records it (0 == primary).
+  if echo "$arg" | grep -qE '^[0-9]+$'; then
+    [ "$arg" = "0" ] && { echo "$rw_main"; return 0; }
+    oldifs=$IFS; IFS='
+'
+    for wt in $paths; do
+      [ "$(slot_of_env "$wt")" = "$arg" ] && { IFS=$oldifs; echo "$wt"; return 0; }
+    done
+    IFS=$oldifs
+  fi
+
+  # 4. Worktree directory basename (e.g. a Claude worktree's name).
+  matches=""
+  oldifs=$IFS; IFS='
+'
+  for wt in $paths; do
+    [ "$(basename "$wt")" = "$arg" ] && matches="$matches$wt
+"
+  done
+  IFS=$oldifs
+  count=$(printf '%s' "$matches" | grep -c .)
+  if [ "$count" -eq 1 ]; then
+    printf '%s' "$matches" | sed '/^$/d'; return 0
+  elif [ "$count" -gt 1 ]; then
+    echo "worktree rm: '$arg' matches multiple worktrees:" >&2
+    printf '%s' "$matches" | sed 's/^/  /' >&2
+    return 1
+  fi
+
+  echo "worktree rm: no worktree matches '$arg'. Known worktrees:" >&2
+  echo "$paths" | sed 's/^/  /' >&2
+  return 1
+}
+
+# --- slot-allocation lock ----------------------------------------------------
+# next_free_slot reads slots, but a slot only becomes "used" once provision()
+# writes its .env — that gap lets two concurrent add/adopt calls claim the same
+# N. Serialize alloc->provision with a lock in the shared git common dir, so
+# every worktree of this repo contends on one file.
+slot_lock_path() {
+  common=$(git rev-parse --git-common-dir 2>/dev/null) || common=".git"
+  case "$common" in /*) ;; *) common="$(pwd)/$common" ;; esac
+  printf '%s/worktree-slot.lock' "$common"
+}
+
+SLOT_LOCK_HELD=""
+SLOT_LOCK_DIR=""
+slot_lock_release() {
+  if [ -n "$SLOT_LOCK_HELD" ]; then
+    exec 9>&- 2>/dev/null || true
+    SLOT_LOCK_HELD=""
+  fi
+  if [ -n "$SLOT_LOCK_DIR" ]; then
+    rmdir "$SLOT_LOCK_DIR" 2>/dev/null || true
+    SLOT_LOCK_DIR=""
+  fi
+}
+trap slot_lock_release EXIT
+
+slot_lock_acquire() {
+  lock="$(slot_lock_path)"
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$lock"
+    flock 9
+    SLOT_LOCK_HELD=1
+  else
+    # flock is Linux-only; mkdir is the portable atomic fallback — the create
+    # succeeds for exactly one racer.
+    lockdir="$lock.d"
+    tries=0
+    while ! mkdir "$lockdir" 2>/dev/null; do
+      tries=$((tries + 1))
+      if [ "$tries" -ge 150 ]; then
+        echo "worktree: timed out waiting for slot lock ($lockdir)" >&2
+        exit 1
+      fi
+      sleep 0.2
+    done
+    SLOT_LOCK_DIR="$lockdir"
+  fi
+}
+
+# --- subcommands -------------------------------------------------------------
+cmd_add() {
+  slug=""
+  type="feat"
+  start=1
+  for arg in "$@"; do
+    case "$arg" in
+      --no-start) start=0 ;;
+      --*) echo "worktree add: unknown flag $arg" >&2; exit 2 ;;
+      *)
+        if [ -z "$slug" ]; then slug="$arg"
+        else type="$arg"
+        fi
+        ;;
+    esac
+  done
+  [ -n "$slug" ] || { echo "usage: bin/worktree add <slug> [<type>] [--no-start]" >&2; exit 2; }
+  case "$slug" in */*) echo "worktree add: slug must not contain '/'" >&2; exit 2 ;; esac
+
+  main=$(main_worktree)
+  repo=$(basename "$main")
+  parent=$(dirname "$main")
+  dest="$parent/$repo-$slug"
+  branch="ai/$type/$slug"
+
+  [ -e "$dest" ] && { echo "worktree add: $dest already exists" >&2; exit 1; }
+
+  slot_lock_acquire
+  slot=$(next_free_slot)
+  read -r _ _ web_port _ _ <<EOF
+$(ports_for_slot "$slot")
+EOF
+
+  echo "==> Creating worktree '$slug' (slot $slot)"
+  echo "    path:   $dest"
+  echo "    branch: $branch"
+
+  git worktree add "$dest" -b "$branch"
+  provision "$dest" "$slot"
+  slot_lock_release
+
+  if [ "$start" -eq 1 ]; then
+    echo "==> Booting services (mise run start)"
+    (cd "$dest" && mise run start)
+  else
+    echo "==> Skipped boot (--no-start). Start later with: cd $dest && mise run start"
+  fi
+
+  echo "==> Done. Web server: http://localhost:$web_port"
+}
+
+# Write the per-worktree .env (slot + ports), copy the gitignored secrets a
+# checkout doesn't carry, and trust the configs. Shared by add and adopt.
+provision() {
+  dest="$1"
+  slot="$2"
+  main=$(main_worktree)
+  read -r db_port redis_port web_port mail_smtp_port mail_ui_port <<EOF
+$(ports_for_slot "$slot")
+EOF
+
+  echo "==> Writing $dest/.env (slot $slot: db=$db_port redis=$redis_port web=$web_port mail=$mail_smtp_port/$mail_ui_port)"
+  cat > "$dest/.env" <<EOF
+# Generated by bin/worktree — isolated dev services for this worktree.
+# Slot $slot drives the ports; the slot's .env overrides any inherited
+# parent mise config (a deeper config wins), so this works for nested worktrees.
+WORKTREE_SLOT=$slot
+DB_PORT=$db_port
+REDIS_PORT=$redis_port
+PORT=$web_port
+MAIL_SMTP_PORT=$mail_smtp_port
+MAIL_UI_PORT=$mail_ui_port
+EOF
+
+  # master.key is gitignored, so a checkout does not materialise it.
+  if [ -f "$main/config/master.key" ] && [ ! -f "$dest/config/master.key" ]; then
+    cp "$main/config/master.key" "$dest/config/master.key"
+    echo "==> Copied config/master.key"
+  fi
+
+  # Procfile.dev is gitignored; without it `bin/dev start` aborts. Carry the
+  # primary's copy, falling back to the tracked .example.
+  if [ ! -f "$dest/Procfile.dev" ]; then
+    if [ -f "$main/Procfile.dev" ]; then
+      cp "$main/Procfile.dev" "$dest/Procfile.dev"
+      echo "==> Copied Procfile.dev"
+    elif [ -f "$dest/Procfile.dev.example" ]; then
+      cp "$dest/Procfile.dev.example" "$dest/Procfile.dev"
+      echo "==> Created Procfile.dev from Procfile.dev.example"
+    fi
+  fi
+
+  # mise.local.toml is the gitignored per-machine override. Carry it over but
+  # strip the port/slot keys — they live in .env, and a copied PORT would
+  # outrank .env (mise.local.toml > _.file) and collide with the primary.
+  if [ -f "$main/mise.local.toml" ] && [ "$dest" != "$main" ]; then
+    grep -vE '^[[:space:]]*(PORT|DB_PORT|REDIS_PORT|MAIL_SMTP_PORT|MAIL_UI_PORT|WORKTREE_SLOT)[[:space:]]*=' \
+      "$main/mise.local.toml" > "$dest/mise.local.toml"
+    echo "==> Copied mise.local.toml (port/slot keys stripped)"
+  fi
+
+  mise trust "$dest/mise.toml" >/dev/null 2>&1 || true
+  [ -f "$dest/mise.local.toml" ] && mise trust "$dest/mise.local.toml" >/dev/null 2>&1 || true
+
+  # rtk trusts .rtk/filters.toml relative to CWD, so trust it inside the
+  # worktree or rtk prompts on first use there.
+  if [ -f "$dest/.rtk/filters.toml" ] && command -v rtk >/dev/null 2>&1; then
+    (cd "$dest" && rtk trust >/dev/null 2>&1) || true
+    echo "==> Trusted rtk filters"
+  fi
+}
+
+# Bring an existing worktree (e.g. a Claude isolation worktree under
+# .claude/worktrees/) into the scheme: allocate a slot and provision it.
+cmd_adopt() {
+  start=0
+  target=""
+  for arg in "$@"; do
+    case "$arg" in
+      --start) start=1 ;;
+      --*) echo "worktree adopt: unknown flag $arg" >&2; exit 2 ;;
+      *) target="$arg" ;;
+    esac
+  done
+  [ -n "$target" ] || target="$(pwd)"
+  [ -d "$target" ] || { echo "worktree adopt: $target not found" >&2; exit 1; }
+  target=$(cd "$target" && pwd)
+
+  if ! worktree_paths | grep -qx "$target"; then
+    echo "worktree adopt: $target is not a git worktree" >&2
+    exit 1
+  fi
+  main=$(main_worktree)
+  [ "$target" = "$main" ] && { echo "worktree adopt: refusing to adopt the primary checkout" >&2; exit 1; }
+
+  slot_lock_acquire
+  existing=$(slot_of_env "$target")
+  [ -n "$existing" ] && { echo "worktree adopt: already managed (slot $existing)" >&2; exit 1; }
+
+  slot=$(next_free_slot)
+  echo "==> Adopting $target (slot $slot)"
+  provision "$target" "$slot"
+  slot_lock_release
+
+  if [ "$start" -eq 1 ]; then
+    echo "==> Booting services (mise run start)"
+    (cd "$target" && mise run start)
+  else
+    echo "==> Adopted. Start with: cd $target && mise run start"
+  fi
+}
+
+ROW_FMT='%-4s  %-22s  %-5s  %-5s  %-5s  %-4s  %s\n'
+
+cmd_list() {
+  main=$(main_worktree)
+  runtime="${XDG_RUNTIME_DIR:-/tmp}"
+  # SOCK_PREFIX (mise.toml [env]) namespaces the socket dir; read it via mise
+  # so this script stays app-agnostic. Single quotes are intentional — the
+  # expansion must happen in the inner mise shell, not here.
+  # shellcheck disable=SC2016
+  sock_prefix=$( (cd "$main" && mise x -- sh -c 'printf %s "${SOCK_PREFIX}"') 2>/dev/null )
+  [ -n "$sock_prefix" ] || sock_prefix=pm
+  # shellcheck disable=SC2059  # ROW_FMT is a fixed format constant, not input
+  printf "$ROW_FMT" SLOT SLUG DB RED WEB PG PATH
+  worktree_paths | while read -r wt; do
+    slug=$(slug_of_path "$wt"); [ -n "$slug" ] || slug="-"
+    slot=$(slot_of_env "$wt")
+    if [ -z "$slot" ]; then
+      # Primary has no .env but uses mise's slot-0 defaults; any other
+      # slot-less worktree (e.g. an unadopted Claude one) has no ports.
+      if [ "$wt" = "$main" ]; then
+        slot=0
+      else
+        # shellcheck disable=SC2059
+        printf "$ROW_FMT" "-" "$slug" "-" "-" "-" "-" "$wt"
+        continue
+      fi
+    fi
+    read -r db_port redis_port web_port _ _ <<EOF
+$(ports_for_slot "$slot")
+EOF
+    # Probe this slot's OWN Postgres via its unix socket, not localhost TCP:
+    # under WSL2 localhost is shared across distros, so a TCP probe can report
+    # an unrelated process as "up". The socket dir is filesystem-local.
+    if pg_isready -h "$runtime/$sock_prefix-$slot" -p "$db_port" -q 2>/dev/null; then
+      pg=up
+    else
+      pg=down
+    fi
+    # shellcheck disable=SC2059
+    printf "$ROW_FMT" "$slot" "$slug" "$db_port" "$redis_port" "$web_port" "$pg" "$wt"
+  done || true
+}
+
+cmd_rm() {
+  target_arg=""
+  delete_branch=0
+  force=0
+  for arg in "$@"; do
+    case "$arg" in
+      --delete-branch) delete_branch=1 ;;
+      --force) force=1 ;;
+      --*) echo "worktree rm: unknown flag $arg" >&2; exit 2 ;;
+      *) target_arg="$arg" ;;
+    esac
+  done
+  [ -n "$target_arg" ] || { echo "usage: bin/worktree rm <slug|name|path|slot> [--delete-branch] [--force]" >&2; exit 2; }
+
+  main=$(main_worktree)
+  dest=$(resolve_worktree "$target_arg") || exit 1
+  [ "$dest" = "$main" ] && { echo "worktree rm: refusing to remove the primary checkout" >&2; exit 1; }
+
+  branch=$(git -C "$dest" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+
+  echo "==> Stopping services in $dest"
+  (cd "$dest" && mise run stop) || true
+
+  # Drop the gitignored artifacts provision() planted; otherwise every adopted
+  # worktree (Claude ones included) would carry untracked files and force a
+  # --force removal. Real uncommitted work still blocks removal without --force.
+  for f in .env mise.local.toml config/master.key Procfile.dev; do
+    rm -f "$dest/$f"
+  done
+
+  echo "==> Removing worktree $dest"
+  if [ "$force" -eq 1 ]; then
+    git worktree remove --force "$dest"
+  else
+    git worktree remove "$dest"
+  fi
+
+  # "HEAD" means the worktree was detached — no branch to report.
+  if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
+    :
+  elif [ "$delete_branch" -eq 1 ]; then
+    echo "==> Deleting branch $branch"
+    git branch -D "$branch"
+  else
+    echo "    Branch '$branch' kept. Delete with: git branch -D $branch"
+  fi
+}
+
+# SessionStart-hook entry point. When a shell opens inside a Claude Code
+# isolation worktree (.claude/worktrees/<name>), adopt it into a slot so its
+# dev services don't collide with the primary checkout. Adopt-only: services
+# stay DOWN. A silent no-op everywhere else, and on every run after the first.
+# Wire it as `command: bin/worktree autoadopt` in .claude/settings.json.
+#
+# There is deliberately no auto-remove counterpart: tearing a worktree down on
+# session end would risk unfinished/uncommitted work. Remove explicitly with
+# `bin/worktree rm <name>` (accepts the worktree dir name, path, or slot).
+cmd_autoadopt() {
+  case "$PWD" in
+    */.claude/worktrees/*) ;;
+    *) exit 0 ;;
+  esac
+  command -v git >/dev/null 2>&1 || exit 0
+  if [ -f .env ] && grep -qE '^[[:space:]]*WORKTREE_SLOT[[:space:]]*=' .env; then
+    exit 0
+  fi
+  # adopt guards against the primary checkout / an already-managed worktree;
+  # never let a failure abort the session.
+  cmd_adopt . || true
+}
+
+# --- dispatch ----------------------------------------------------------------
+[ $# -ge 1 ] || { echo "usage: bin/worktree {add|adopt|autoadopt|list|rm} ..." >&2; exit 2; }
+sub="$1"; shift
+case "$sub" in
+  add)       cmd_add "$@" ;;
+  adopt)     cmd_adopt "$@" ;;
+  autoadopt) cmd_autoadopt "$@" ;;
+  list)      cmd_list "$@" ;;
+  rm)        cmd_rm "$@" ;;
+  *)         echo "bin/worktree: unknown subcommand '$sub'" >&2; exit 2 ;;
+esac

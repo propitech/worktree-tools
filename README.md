@@ -1,0 +1,70 @@
+# worktree-tools
+
+`worktree` — manage git worktrees with isolated dev services. Each worktree
+gets a unique **slot** that drives a non-colliding port set (Postgres, Redis,
+web, Mailpit), so several worktrees run their own stack at once.
+
+Extracted from the [Fosa](https://github.com/propitech/fosa) Rails template so
+it lives in one place and is consumed by every app via [mise](https://mise.jdx.dev),
+rather than vendored and hand-synced per repo.
+
+## Install (mise)
+
+Add to a project's `mise.toml`:
+
+```toml
+[tools]
+"ubi:propitech/worktree-tools" = "1.0.0"   # pin; `mise up worktree-tools` to bump
+
+[tools."ubi:propitech/worktree-tools"]
+exe = "worktree"
+```
+
+`mise install` shims `worktree` onto PATH. Projects keep a thin
+`bin/worktree` binstub so the familiar path still works:
+
+```sh
+#!/usr/bin/env sh
+exec mise exec -- worktree "$@"
+```
+
+## Usage
+
+```sh
+bin/worktree add <slug> [<type>] [--no-start]      # create + boot on own ports
+bin/worktree list                                   # slots, slugs, ports, PG health
+bin/worktree adopt [<path>] [--start]               # adopt an existing worktree
+bin/worktree rm <slug|name|path|slot> [--delete-branch] [--force]
+bin/worktree autoadopt                              # SessionStart hook entry point
+```
+
+### Claude Code auto-adopt
+
+`worktree autoadopt` is a SessionStart hook: when a Claude Code session opens
+inside a `.claude/worktrees/<name>` isolation worktree, it adopts the worktree
+into a slot (services stay down). Wire it in `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [{ "type": "command", "command": "bin/worktree autoadopt" }]
+      }
+    ]
+  }
+}
+```
+
+There is deliberately no auto-remove counterpart — removal stays explicit
+(`bin/worktree rm <name>`).
+
+## Releases
+
+Tag `vX.Y.Z`; CI packages `worktree` into `worktree-vX.Y.Z.tar.gz` and attaches
+it to a GitHub release. `ubi` installs that asset.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

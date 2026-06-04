@@ -1,0 +1,38 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package per-platform tarballs
+        run: |
+          ver="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          # `worktree` is a platform-agnostic POSIX shell script, but ubi
+          # resolves a release asset by matching the host target triple. Ship
+          # the same script under each triple so every platform finds a match.
+          for triple in \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            x86_64-apple-darwin \
+            aarch64-apple-darwin; do
+            tar -czf "dist/worktree-${ver}-${triple}.tar.gz" worktree
+          done
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "worktree ${GITHUB_REF_NAME}"
