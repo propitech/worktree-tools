@@ -14,8 +14,9 @@ Add to a project's `mise.toml`:
 
 ```toml
 [tools]
-# pin the version; `mise up github:propitech/worktree-tools` to bump
-"github:propitech/worktree-tools" = { version = "1.0.0", exe = "worktree" }
+# `latest` tracks new releases on `mise install` / `mise up`; pin a version
+# (e.g. "1.0.0") instead if you want reproducible, explicit bumps.
+"github:propitech/worktree-tools" = { version = "latest", exe = "worktree" }
 ```
 
 `mise install` shims `worktree` onto PATH. Projects keep a thin
