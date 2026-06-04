@@ -14,10 +14,8 @@ Add to a project's `mise.toml`:
 
 ```toml
 [tools]
-"ubi:propitech/worktree-tools" = "1.0.0"   # pin; `mise up worktree-tools` to bump
-
-[tools."ubi:propitech/worktree-tools"]
-exe = "worktree"
+# pin the version; `mise up github:propitech/worktree-tools` to bump
+"github:propitech/worktree-tools" = { version = "1.0.0", exe = "worktree" }
 ```
 
 `mise install` shims `worktree` onto PATH. Projects keep a thin
