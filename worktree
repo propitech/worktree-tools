@@ -9,7 +9,9 @@
 # gitignored .env, which mise loads first so it overrides the defaults.
 #
 # Usage:
-#   bin/worktree add <slug> [<type>] [--no-start]   # type defaults to "feat"
+#   bin/worktree add <slug> [<type>] [--no-start] [--prefix <ns>]
+#       type defaults to "feat"; branch namespace <ns> defaults to empty
+#       (no namespace). Set it via --prefix or $WORKTREE_BRANCH_PREFIX.
 #   bin/worktree adopt [<path>] [--start]           # adopt an existing worktree
 #   bin/worktree list
 #   bin/worktree rm <slug|name|path|slot> [--delete-branch] [--force]
@@ -199,25 +201,47 @@ cmd_add() {
   slug=""
   type="feat"
   start=1
-  for arg in "$@"; do
-    case "$arg" in
+  # prefix defaults to empty (no namespace); the caller — typically an AI
+  # agent — sets it via --prefix or $WORKTREE_BRANCH_PREFIX. prefix_from_cli
+  # lets an explicit --prefix override the env var.
+  prefix=""
+  prefix_from_cli=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
       --no-start) start=0 ;;
-      --*) echo "worktree add: unknown flag $arg" >&2; exit 2 ;;
+      --prefix=*) prefix=${1#--prefix=}; prefix_from_cli=1 ;;
+      --prefix)
+        shift
+        [ $# -gt 0 ] || { echo "worktree add: --prefix needs a value" >&2; exit 2; }
+        prefix=$1; prefix_from_cli=1
+        ;;
+      --*) echo "worktree add: unknown flag $1" >&2; exit 2 ;;
       *)
-        if [ -z "$slug" ]; then slug="$arg"
-        else type="$arg"
+        if [ -z "$slug" ]; then slug="$1"
+        else type="$1"
         fi
         ;;
     esac
+    shift
   done
-  [ -n "$slug" ] || { echo "usage: bin/worktree add <slug> [<type>] [--no-start]" >&2; exit 2; }
+  [ -n "$slug" ] || { echo "usage: bin/worktree add <slug> [<type>] [--no-start] [--prefix <ns>]" >&2; exit 2; }
   case "$slug" in */*) echo "worktree add: slug must not contain '/'" >&2; exit 2 ;; esac
+
+  # Branch namespace prefix. --prefix wins; else $WORKTREE_BRANCH_PREFIX; else
+  # empty. Empty means no namespace segment: branch is just "<type>/<slug>".
+  [ "$prefix_from_cli" -eq 1 ] || prefix=${WORKTREE_BRANCH_PREFIX-}
+  # Trim leading/trailing slashes so "ai/" never yields "ai//feat".
+  prefix=$(printf '%s' "$prefix" | sed 's#^/*##; s#/*$##')
 
   main=$(main_worktree)
   repo=$(basename "$main")
   parent=$(dirname "$main")
   dest="$parent/$repo-$slug"
-  branch="ai/$type/$slug"
+  if [ -n "$prefix" ]; then
+    branch="$prefix/$type/$slug"
+  else
+    branch="$type/$slug"
+  fi
 
   [ -e "$dest" ] && { echo "worktree add: $dest already exists" >&2; exit 1; }
 

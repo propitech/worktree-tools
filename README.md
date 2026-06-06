@@ -30,12 +30,28 @@ exec mise exec -- worktree "$@"
 ## Usage
 
 ```sh
-bin/worktree add <slug> [<type>] [--no-start]      # create + boot on own ports
+bin/worktree add <slug> [<type>] [--no-start] [--prefix <ns>]   # create + boot on own ports
 bin/worktree list                                   # slots, slugs, ports, PG health
 bin/worktree adopt [<path>] [--start]               # adopt an existing worktree
 bin/worktree rm <slug|name|path|slot> [--delete-branch] [--force]
 bin/worktree autoadopt                              # SessionStart hook entry point
 ```
+
+### Branch namespace
+
+`add` names the new branch `<ns>/<type>/<slug>`. The namespace `<ns>` is
+**empty by default** (no namespace segment), so `worktree add login` creates
+`feat/login`. Set a namespace per-invocation with `--prefix`, or project-wide
+via the `WORKTREE_BRANCH_PREFIX` env var (e.g. in `mise.toml` `[env]`):
+
+```sh
+bin/worktree add login              # feat/login      (default, no namespace)
+bin/worktree add login --prefix ai  # ai/feat/login
+WORKTREE_BRANCH_PREFIX=ai bin/worktree add login   # ai/feat/login
+```
+
+Precedence: `--prefix` wins, then `WORKTREE_BRANCH_PREFIX`, then empty. AI
+agents working in this repo are expected to set the namespace explicitly.
 
 ### Claude Code auto-adopt
 
