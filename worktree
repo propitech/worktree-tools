@@ -18,11 +18,14 @@
 #
 set -eu
 
-DB_PORT_BASE=5431
-REDIS_PORT_BASE=6379
-WEB_PORT_BASE=3000
-MAIL_SMTP_PORT_BASE=1025
-MAIL_UI_PORT_BASE=8025
+# Slot-0 base ports. Override per-repo via env (e.g. an app's mise.toml
+# [env]) so an app that must coexist with another on the same machine can
+# shift its whole port range; slot N is still BASE + N * PORT_STRIDE.
+DB_PORT_BASE="${DB_PORT_BASE:-5431}"
+REDIS_PORT_BASE="${REDIS_PORT_BASE:-6379}"
+WEB_PORT_BASE="${WEB_PORT_BASE:-3000}"
+MAIL_SMTP_PORT_BASE="${MAIL_SMTP_PORT_BASE:-1025}"
+MAIL_UI_PORT_BASE="${MAIL_UI_PORT_BASE:-8025}"
 # Stride is wide enough that no slot lands on a well-known port (e.g. a
 # system Postgres on 5432): slot 1 -> +10, slot 2 -> +20, ...
 PORT_STRIDE=10

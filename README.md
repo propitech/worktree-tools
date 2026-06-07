@@ -53,6 +53,24 @@ WORKTREE_BRANCH_PREFIX=ai bin/worktree add login   # ai/feat/login
 Precedence: `--prefix` wins, then `WORKTREE_BRANCH_PREFIX`, then empty. AI
 agents working in this repo are expected to set the namespace explicitly.
 
+### Port bases
+
+Each slot's ports are `BASE + slot * 10`. The five slot-0 bases default to the
+values below and can be overridden per-repo via env (typically the app's
+`mise.toml` `[env]`), so an app that must run beside another on the same
+machine can shift its whole port range and never collide:
+
+```sh
+DB_PORT_BASE         # default 5431  (Postgres)
+REDIS_PORT_BASE      # default 6379  (Redis)
+WEB_PORT_BASE        # default 3000  (Rails / web)
+MAIL_SMTP_PORT_BASE  # default 1025  (Mailpit SMTP)
+MAIL_UI_PORT_BASE    # default 8025  (Mailpit UI)
+```
+
+For example, a second app that sets `DB_PORT_BASE=5433` (and the rest) gets
+slots 5433 / 5443 / 5453 …, never touching the first app's 5431 / 5441 / 5451.
+
 ### Claude Code auto-adopt
 
 `worktree autoadopt` is a SessionStart hook: when a Claude Code session opens
