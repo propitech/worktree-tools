@@ -35,6 +35,7 @@ bin/worktree list                                   # slots, slugs, ports, PG he
 bin/worktree adopt [<path>] [--start]               # adopt an existing worktree
 bin/worktree rm <slug|name|path|slot> [--delete-branch] [--force]
 bin/worktree autoadopt                              # SessionStart hook entry point
+bin/worktree services <start|stop|status>           # shared dev daemons (one set per machine)
 ```
 
 ### Branch namespace
@@ -70,6 +71,38 @@ MAIL_UI_PORT_BASE    # default 8025  (Mailpit UI)
 
 For example, a second app that sets `DB_PORT_BASE=5433` (and the rest) gets
 slots 5433 / 5443 / 5453 …, never touching the first app's 5431 / 5441 / 5451.
+
+### Shared dev services
+
+`worktree services` runs **one** Postgres, **one** Redis, and **one** Mailpit
+per machine, shared by every worktree of every app — the first step of the
+shared-services model ([plan 0001](https://linear.app/propitech/document/plan-0001-shared-dev-services-across-worktrees-and-apps-52c0dea97522);
+isolation moves from per-worktree port offsets to per-app+slot namespaces).
+
+```sh
+bin/worktree services start    # idempotent: init data dirs + boot the three daemons
+bin/worktree services status   # per-service health; names a foreign listener on a shared port
+bin/worktree services stop     # explicit only — no auto-stop, no refcounting
+```
+
+- **Idempotent + machine-global.** `start` is safe to call from anywhere
+  (concurrently, from any app repo); a `flock` on `~/.config/propitech-dev/lock`
+  serializes boot and registry writes so two repos converge on one daemon set.
+- **Post-boot verification.** Daemon exit codes are not trusted — Postgres is
+  confirmed with `pg_isready` on its socket, Redis with a socket `PING` plus a
+  TCP `CONFIG GET databases` (a `--daemonize` Redis exits 0 even when its bind
+  fails), Mailpit by its pidfile + process name. `start` exits non-zero if any
+  service fails to come up.
+- **Config.** Server versions are pinned in `~/.config/propitech-dev/mise.toml`;
+  ports (defaults `5431 / 6379 / 1025 / 8025`) live in
+  `~/.config/propitech-dev/config` — the one place to shift a squatted port.
+  Data lives under `$XDG_STATE_HOME/propitech-dev/`, sockets under
+  `$XDG_RUNTIME_DIR/propitech-dev`; the resolved paths are recorded in the
+  registry so every shell agrees on one cluster.
+
+The per-worktree `.env`/namespace contract that consumes these shared services
+is rolled out separately (gated, opt-in per app) and does not change existing
+worktree behaviour until an app adopts it.
 
 ### Claude Code auto-adopt
 
