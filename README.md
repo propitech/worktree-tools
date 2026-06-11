@@ -35,6 +35,7 @@ bin/worktree list                                   # slots, slugs, ports, PG he
 bin/worktree adopt [<path>] [--start]               # adopt an existing worktree
 bin/worktree rm <slug|name|path|slot> [--delete-branch] [--force]
 bin/worktree autoadopt                              # SessionStart hook entry point
+bin/worktree reprovision [<target>]                 # rewrite a worktree's .env to the current contract
 bin/worktree services <start|stop|status>           # shared dev daemons (one set per machine)
 ```
 
@@ -100,9 +101,28 @@ bin/worktree services stop     # explicit only — no auto-stop, no refcounting
   `$XDG_RUNTIME_DIR/propitech-dev`; the resolved paths are recorded in the
   registry so every shell agrees on one cluster.
 
-The per-worktree `.env`/namespace contract that consumes these shared services
-is rolled out separately (gated, opt-in per app) and does not change existing
-worktree behaviour until an app adopts it.
+#### Opting an app in (the `.env` contract)
+
+The per-worktree `.env` is **capability-gated**, so this is safe for apps that
+haven't migrated. An app opts in by setting `WORKTREE_SERVICES=shared` and
+`WORKTREE_APP=<name>` in its `mise.toml [env]`:
+
+- **Gated app** → `add`/`adopt` write the namespace contract: fixed shared
+  `DB_PORT`/`MAIL_*` from the services config, `WORKTREE_DB_SUFFIX=_s<slot>`
+  (empty for the primary), and `REDIS_DB = app_base + slot` (each app gets a
+  registry-allocated 16-slot band) plus a full `REDIS_URL`. Only the web `PORT`
+  stays slot-derived. The **primary checkout** is provisioned too (slot 0), so
+  two apps' primaries don't collide on Redis DB 0.
+- **Ungated app** → behaviour is byte-identical to before (slot-offset ports).
+
+`WORKTREE_APP` is required when gated and must name the app explicitly —
+`SOCK_PREFIX` is not the app name (e.g. property_management bakes `pm` while its
+databases are `property_management_*`). `worktree add` aborts if it's missing.
+
+**`worktree reprovision [<target>]`** rewrites an existing worktree's `.env` to
+the current contract in place — for a worktree whose branch carries WIP (so
+`rm` + `add` isn't an option) or one written under the old contract. Defaults to
+the current worktree; the primary reprovisions as slot 0.
 
 ### Claude Code auto-adopt
 
