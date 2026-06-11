@@ -15,6 +15,7 @@
 #   bin/worktree adopt [<path>] [--start]           # adopt an existing worktree
 #   bin/worktree list
 #   bin/worktree rm <slug|name|path|slot> [--delete-branch] [--force]
+#   bin/worktree services <start|stop|status>  # shared dev daemons (one set per machine)
 #
 set -eu
 
@@ -174,7 +175,7 @@ slot_lock_release() {
     SLOT_LOCK_DIR=""
   fi
 }
-trap slot_lock_release EXIT
+trap 'slot_lock_release; svc_lock_release' EXIT
 
 slot_lock_acquire() {
   lock="$(slot_lock_path)"
@@ -487,8 +488,378 @@ cmd_autoadopt() {
   cmd_adopt . || true
 }
 
+# --- shared dev services (plan 0001 D1/D4) -----------------------------------
+# One Postgres + one Redis + one Mailpit per machine, shared by every worktree
+# of every app. Isolation moves to namespaces (db name / redis index) set per
+# worktree by provision(); this section owns only the daemons themselves.
+#
+# ~/.config is the single XDG base stable across login / IDE / hook / cron
+# shells, so it anchors the config, registry, lock and pinned-version mise.toml.
+# The volatile data/runtime roots (XDG_STATE_HOME / XDG_RUNTIME_DIR are NOT
+# stable across WSL2 shells) are resolved once and recorded in the registry, so
+# two shells with different XDG env can never initdb two rival "shared"
+# clusters.
+
+svc_config_dir() {
+  printf '%s/propitech-dev' "${XDG_CONFIG_HOME:-$HOME/.config}"
+}
+
+# Machine-global lock around start/stop and every registry write — the
+# repo-scoped slot lock cannot serialize two different apps. flock when
+# available, mkdir otherwise (same fallback shape as the slot lock, fd 8 vs 9).
+SVC_LOCK_HELD=""
+SVC_LOCK_DIR=""
+svc_lock_release() {
+  if [ -n "$SVC_LOCK_HELD" ]; then
+    exec 8>&- 2>/dev/null || true
+    SVC_LOCK_HELD=""
+  fi
+  if [ -n "$SVC_LOCK_DIR" ]; then
+    rmdir "$SVC_LOCK_DIR" 2>/dev/null || true
+    SVC_LOCK_DIR=""
+  fi
+}
+
+svc_lock_acquire() {
+  cfg="$(svc_config_dir)"
+  mkdir -p "$cfg"
+  lock="$cfg/lock"
+  if command -v flock >/dev/null 2>&1; then
+    exec 8>"$lock"
+    flock 8
+    SVC_LOCK_HELD=1
+  else
+    lockdir="$lock.d"
+    tries=0
+    while ! mkdir "$lockdir" 2>/dev/null; do
+      tries=$((tries + 1))
+      if [ "$tries" -ge 150 ]; then
+        echo "worktree services: timed out waiting for lock ($lockdir)" >&2
+        exit 1
+      fi
+      sleep 0.2
+    done
+    SVC_LOCK_DIR="$lockdir"
+  fi
+}
+
+# Registry: a flat KEY=value file read/written with grep (no eval of file
+# contents). Holds the resolved data/runtime roots; PRO-121 adds per-app bases.
+svc_registry_get() {
+  reg="$(svc_config_dir)/registry"
+  [ -f "$reg" ] || return 0
+  grep -E "^$1=" "$reg" 2>/dev/null | tail -n1 | cut -d= -f2-
+}
+
+svc_registry_set() {
+  cfg="$(svc_config_dir)"
+  reg="$cfg/registry"
+  mkdir -p "$cfg"
+  tmp="$reg.tmp.$$"
+  if [ -f "$reg" ]; then
+    grep -vE "^$1=" "$reg" > "$tmp" 2>/dev/null || : > "$tmp"
+  else
+    : > "$tmp"
+  fi
+  printf '%s=%s\n' "$1" "$2" >> "$tmp"
+  mv "$tmp" "$reg"
+}
+
+# Resolve the data + runtime roots ONCE, recording them; later runs read them
+# back so the cluster location is stable regardless of the calling shell's XDG.
+# Sets SVC_DATA_DIR / SVC_RUNTIME_DIR.
+svc_ensure_registry() {
+  SVC_DATA_DIR=$(svc_registry_get SVC_DATA_DIR)
+  SVC_RUNTIME_DIR=$(svc_registry_get SVC_RUNTIME_DIR)
+  if [ -z "$SVC_DATA_DIR" ]; then
+    SVC_DATA_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/propitech-dev"
+    svc_registry_set SVC_DATA_DIR "$SVC_DATA_DIR"
+  fi
+  if [ -z "$SVC_RUNTIME_DIR" ]; then
+    SVC_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}/propitech-dev"
+    svc_registry_set SVC_RUNTIME_DIR "$SVC_RUNTIME_DIR"
+  fi
+}
+
+# Machine-global ports config, written with defaults on first run then
+# user-editable — the one place to dodge a squatted well-known port (e.g. a
+# Docker Redis already holding 6379). Sets PG_PORT / REDIS_PORT / MAIL_*_PORT.
+svc_load_config() {
+  PG_PORT=5431
+  REDIS_PORT=6379
+  MAIL_SMTP_PORT=1025
+  MAIL_UI_PORT=8025
+  conf="$(svc_config_dir)/config"
+  if [ -f "$conf" ]; then
+    # shellcheck disable=SC1090
+    . "$conf"
+  fi
+}
+
+svc_write_defaults() {
+  cfg="$(svc_config_dir)"
+  conf="$cfg/config"
+  if [ ! -f "$conf" ]; then
+    cat > "$conf" <<'EOF'
+# propitech-dev shared services — machine-global ports.
+# Edit to dodge a squatted well-known port; applies to every app on this machine.
+PG_PORT=5431
+REDIS_PORT=6379
+MAIL_SMTP_PORT=1025
+MAIL_UI_PORT=8025
+EOF
+  fi
+  # Pinned daemon versions: mise loads this when we invoke daemons via
+  # `mise -C <cfg> x --`, so the shared services run one canonical version set
+  # whatever any app pins. Written once, then editable.
+  mt="$cfg/mise.toml"
+  if [ ! -f "$mt" ]; then
+    cat > "$mt" <<'EOF'
+# propitech-dev shared services — pinned daemon versions.
+# One canonical set for every app's shared Postgres/Redis/Mailpit. Edit to bump.
+[tools]
+postgres = "16"
+redis = "7.4"
+mailpit = "latest"
+EOF
+  fi
+}
+
+# Run a daemon/client through the pinned-version config with the app's mise
+# [env] scrubbed: the manager runs under the app's `mise exec`, so without this
+# the app's DB_PORT / SOCK_DIR / PG_DATA_DIR / REDIS_PORT… would leak into the
+# shared daemons and point them at the wrong place.
+#
+# 8>&- 9>&- close the lock fds before exec so a long-lived daemon started while
+# the lock is held (Postgres, Redis) does NOT inherit and pin it — otherwise the
+# daemon keeps fd 8 open after start exits and the machine-global flock never
+# releases, deadlocking the next start. Harmless for the short-lived probes.
+svc_run() {
+  env -u DB_PORT -u DB_HOST -u DB_USER -u DB_PASS -u DB_NAME \
+      -u REDIS_PORT -u REDIS_URL -u REDIS_DB \
+      -u PORT -u MAIL_SMTP_PORT -u MAIL_UI_PORT \
+      -u PG_DATA_DIR -u SOCK_DIR -u SOCK_PREFIX -u WORKTREE_SLOT \
+      -u WORKTREE_DB_SUFFIX -u WORKTREE_APP -u WORKTREE_SERVICES \
+      mise -C "$(svc_config_dir)" x -- "$@" 8>&- 9>&-
+}
+
+# Retry a verification predicate briefly — daemons fork before they bind.
+svc_retry() {
+  i=0
+  while [ "$i" -lt 30 ]; do
+    "$1" && return 0
+    i=$((i + 1))
+    sleep 0.1
+  done
+  return 1
+}
+
+# Process name for a pid, portably: /proc on Linux (WSL2), ps elsewhere (macOS).
+svc_proc_comm() {
+  if [ -r "/proc/$1/comm" ]; then
+    cat "/proc/$1/comm" 2>/dev/null
+  else
+    ps -p "$1" -o comm= 2>/dev/null
+  fi
+}
+
+svc_log_dir()      { printf '%s/logs' "$SVC_DATA_DIR"; }
+svc_pg_data()      { printf '%s/postgres' "$SVC_DATA_DIR"; }
+svc_redis_sock()   { printf '%s/redis.sock' "$SVC_RUNTIME_DIR"; }
+svc_redis_pid()    { printf '%s/redis.pid' "$SVC_RUNTIME_DIR"; }
+svc_mailpit_pid()  { printf '%s/mailpit.pid' "$SVC_RUNTIME_DIR"; }
+svc_mailpit_db()   { printf '%s/mailpit.db' "$SVC_DATA_DIR"; }
+
+# --- per-service start / verify ----------------------------------------------
+# Postgres listens on both the unix socket (probes — WSL2 shares localhost, so a
+# TCP probe can report an unrelated process as "up") and TCP 127.0.0.1 (apps
+# connect via DB_HOST/DB_PORT).
+svc_start_postgres() {
+  pgdata="$(svc_pg_data)"
+  mkdir -p "$pgdata" "$(svc_log_dir)" "$SVC_RUNTIME_DIR"
+  if [ ! -f "$pgdata/PG_VERSION" ]; then
+    echo "    initdb $pgdata"
+    svc_run initdb -D "$pgdata" -U "${USER:-$(id -un)}" -E UTF8 --auth=trust >/dev/null 2>&1
+  fi
+  svc_run pg_ctl -D "$pgdata" status >/dev/null 2>&1 && return 0
+  svc_run pg_ctl -D "$pgdata" -l "$(svc_log_dir)/postgres.log" -w \
+    -o "-c unix_socket_directories=$SVC_RUNTIME_DIR -c listen_addresses=127.0.0.1 -c port=$PG_PORT" \
+    start >/dev/null 2>&1 || true
+}
+
+svc_verify_postgres() {
+  svc_run pg_isready -h "$SVC_RUNTIME_DIR" -p "$PG_PORT" -q 2>/dev/null
+}
+
+svc_start_redis() {
+  datadir="$SVC_DATA_DIR/redis"
+  mkdir -p "$datadir" "$(svc_log_dir)" "$SVC_RUNTIME_DIR"
+  if [ -S "$(svc_redis_sock)" ] && svc_run redis-cli -s "$(svc_redis_sock)" ping >/dev/null 2>&1; then
+    return 0
+  fi
+  svc_run redis-server \
+    --daemonize yes \
+    --dir "$datadir" \
+    --unixsocket "$(svc_redis_sock)" \
+    --bind 127.0.0.1 \
+    --port "$REDIS_PORT" \
+    --databases 1024 \
+    --pidfile "$(svc_redis_pid)" \
+    --logfile "$(svc_log_dir)/redis.log" >/dev/null 2>&1 || true
+}
+
+# PING over our socket proves OUR daemon is alive; CONFIG GET databases over the
+# TCP port proves WE own that port — `redis-server --daemonize` exits 0 even
+# when the TCP bind fails (a foreign Redis squatting the port), and apps connect
+# by TCP, so a socket-only check would pass while apps hit the wrong server.
+svc_verify_redis() {
+  [ "$(svc_run redis-cli -s "$(svc_redis_sock)" ping 2>/dev/null)" = "PONG" ] || return 1
+  [ "$(svc_run redis-cli -h 127.0.0.1 -p "$REDIS_PORT" config get databases 2>/dev/null | tail -n1)" = "1024" ]
+}
+
+# Mailpit has no unix socket (TCP only) and `--daemonize`-style detach varies by
+# version, so we background it ourselves under nohup and record the pid. Health
+# is pidfile + /proc/<pid>/comm — the documented carve-out from socket probing,
+# with the comm check guarding against pid reuse.
+svc_mailpit_running() {
+  pidf="$(svc_mailpit_pid)"
+  [ -f "$pidf" ] || return 1
+  pid=$(cat "$pidf" 2>/dev/null)
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  case "$(svc_proc_comm "$pid")" in *mailpit*) return 0 ;; *) return 1 ;; esac
+}
+
+svc_start_mailpit() {
+  mkdir -p "$(svc_log_dir)" "$SVC_RUNTIME_DIR"
+  svc_mailpit_running && return 0
+  svc_run sh -c "nohup mailpit \
+      --db-file '$(svc_mailpit_db)' \
+      --smtp '127.0.0.1:$MAIL_SMTP_PORT' \
+      --listen '127.0.0.1:$MAIL_UI_PORT' \
+      >> '$(svc_log_dir)/mailpit.log' 2>&1 & echo \$! > '$(svc_mailpit_pid)'"
+}
+
+# --- orchestration -----------------------------------------------------------
+svc_prepare() {
+  command -v mise >/dev/null 2>&1 || { echo "worktree services: mise not found on PATH" >&2; exit 1; }
+  mkdir -p "$(svc_config_dir)"
+  svc_write_defaults
+  # Trust on every start — idempotent, and re-arms after a user edits the file.
+  mise trust "$(svc_config_dir)/mise.toml" >/dev/null 2>&1 || true
+  mise -C "$(svc_config_dir)" install >/dev/null 2>&1 || true
+  svc_ensure_registry
+  svc_load_config
+}
+
+svc_start() {
+  svc_lock_acquire
+  svc_prepare
+  echo "==> Shared dev services (data: $SVC_DATA_DIR, sockets: $SVC_RUNTIME_DIR)"
+  rc=0
+
+  printf '    postgres (:%s) ... ' "$PG_PORT"
+  svc_start_postgres
+  if svc_retry svc_verify_postgres; then echo "ok"; else echo "FAILED"; rc=1; fi
+
+  printf '    redis    (:%s) ... ' "$REDIS_PORT"
+  svc_start_redis
+  if svc_retry svc_verify_redis; then echo "ok"; else echo "FAILED (port may be held by another Redis)"; rc=1; fi
+
+  printf '    mailpit  (:%s smtp, :%s ui) ... ' "$MAIL_SMTP_PORT" "$MAIL_UI_PORT"
+  svc_start_mailpit
+  if svc_retry svc_mailpit_running; then echo "ok"; else echo "FAILED"; rc=1; fi
+
+  svc_lock_release
+  if [ "$rc" -ne 0 ]; then
+    echo "worktree services: one or more services failed verification (logs in $(svc_log_dir))" >&2
+    exit 1
+  fi
+  echo "==> Ready. Mailpit UI: http://localhost:$MAIL_UI_PORT"
+}
+
+svc_stop() {
+  svc_lock_acquire
+  command -v mise >/dev/null 2>&1 || { echo "worktree services: mise not found on PATH" >&2; exit 1; }
+  svc_ensure_registry
+  svc_load_config
+  echo "==> Stopping shared dev services"
+
+  pgdata="$(svc_pg_data)"
+  if svc_run pg_ctl -D "$pgdata" status >/dev/null 2>&1; then
+    printf '    postgres ... '
+    svc_run pg_ctl -D "$pgdata" -w stop >/dev/null 2>&1 && echo "stopped" || echo "(stop failed)"
+  else
+    echo "    postgres ... not running"
+  fi
+
+  sock="$(svc_redis_sock)"
+  if [ -S "$sock" ] && svc_run redis-cli -s "$sock" ping >/dev/null 2>&1; then
+    printf '    redis    ... '
+    svc_run redis-cli -s "$sock" shutdown nosave >/dev/null 2>&1 || true
+    echo "stopped"
+  else
+    echo "    redis    ... not running"
+  fi
+
+  if svc_mailpit_running; then
+    printf '    mailpit  ... '
+    kill "$(cat "$(svc_mailpit_pid)")" 2>/dev/null && echo "stopped" || echo "(stop failed)"
+    rm -f "$(svc_mailpit_pid)"
+  else
+    echo "    mailpit  ... not running"
+  fi
+
+  svc_lock_release
+}
+
+# Read-only; also names a foreign listener squatting a configured TCP port (the
+# port-conflict guard only fires inside start, but an old per-app daemon can sit
+# on the shared port and silently accept connections — plan D6).
+svc_status() {
+  command -v mise >/dev/null 2>&1 || { echo "worktree services: mise not found on PATH" >&2; exit 1; }
+  svc_ensure_registry
+  svc_load_config
+  echo "Shared dev services (data: $SVC_DATA_DIR, sockets: $SVC_RUNTIME_DIR)"
+
+  if svc_verify_postgres; then
+    echo "  postgres  up       socket $SVC_RUNTIME_DIR  tcp :$PG_PORT"
+  elif svc_run pg_isready -h 127.0.0.1 -p "$PG_PORT" -q 2>/dev/null; then
+    echo "  postgres  FOREIGN  another Postgres holds :$PG_PORT — stop it or change PG_PORT in $(svc_config_dir)/config"
+  else
+    echo "  postgres  down"
+  fi
+
+  if svc_verify_redis; then
+    echo "  redis     up       socket $(svc_redis_sock)  tcp :$REDIS_PORT"
+  elif svc_run redis-cli -h 127.0.0.1 -p "$REDIS_PORT" ping >/dev/null 2>&1; then
+    echo "  redis     FOREIGN  another Redis holds :$REDIS_PORT — stop it or change REDIS_PORT in $(svc_config_dir)/config"
+  else
+    echo "  redis     down"
+  fi
+
+  if svc_verify_mailpit; then
+    echo "  mailpit   up       smtp :$MAIL_SMTP_PORT  ui http://localhost:$MAIL_UI_PORT"
+  else
+    echo "  mailpit   down"
+  fi
+}
+
+svc_verify_mailpit() { svc_mailpit_running; }
+
+cmd_services() {
+  action="${1:-}"
+  case "$action" in
+    start)  svc_start ;;
+    stop)   svc_stop ;;
+    status) svc_status ;;
+    "")     echo "usage: bin/worktree services {start|stop|status}" >&2; exit 2 ;;
+    *)      echo "worktree services: unknown action '$action' (start|stop|status)" >&2; exit 2 ;;
+  esac
+}
+
 # --- dispatch ----------------------------------------------------------------
-[ $# -ge 1 ] || { echo "usage: bin/worktree {add|adopt|autoadopt|list|rm} ..." >&2; exit 2; }
+[ $# -ge 1 ] || { echo "usage: bin/worktree {add|adopt|autoadopt|list|rm|services} ..." >&2; exit 2; }
 sub="$1"; shift
 case "$sub" in
   add)       cmd_add "$@" ;;
@@ -496,5 +867,6 @@ case "$sub" in
   autoadopt) cmd_autoadopt "$@" ;;
   list)      cmd_list "$@" ;;
   rm)        cmd_rm "$@" ;;
+  services)  cmd_services "$@" ;;
   *)         echo "bin/worktree: unknown subcommand '$sub'" >&2; exit 2 ;;
 esac
