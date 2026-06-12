@@ -31,7 +31,7 @@ exec mise exec -- worktree "$@"
 
 ```sh
 bin/worktree add <slug> [<type>] [--no-start] [--prefix <ns>]   # create + boot on own ports
-bin/worktree list                                   # slots, slugs, ports, PG health
+bin/worktree list                                   # slots, slugs, web port, per-worktree status
 bin/worktree adopt [<path>] [--start]               # adopt an existing worktree
 bin/worktree rm <slug|name|path|slot> [--delete-branch] [--force]
 bin/worktree autoadopt                              # SessionStart hook entry point
@@ -123,6 +123,16 @@ databases are `property_management_*`). `worktree add` aborts if it's missing.
 the current contract in place — for a worktree whose branch carries WIP (so
 `rm` + `add` isn't an option) or one written under the old contract. Defaults to
 the current worktree; the primary reprovisions as slot 0.
+
+On a shared-services app, **`worktree rm`** drops only that worktree's exact
+five databases (`<app>_development[_cache|_queue|_cable]<suffix>`, `<app>_test<suffix>`)
+with `DROP DATABASE … WITH (FORCE)` — no glob, so a prefix-named sibling app is
+never caught — and flushes only its Redis DB index (warning first if a client is
+still connected). The shared daemons are left running for every other worktree.
+**`worktree list`** reports a per-worktree `STATUS`: `up`, `db-missing` (slot
+database absent), `services-down`, `stale-contract` (the app migrated but this
+worktree's `.env` hasn't — run `reprovision`), or `legacy:up`/`legacy:down` for
+unmigrated apps; it also flags a foreign Postgres squatting the shared port.
 
 ### Claude Code auto-adopt
 
