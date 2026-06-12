@@ -77,6 +77,17 @@ slot_of_env() {
     | tail -n1 | cut -d= -f2 | sed "s/[[:space:]\"']//g"
 }
 
+# Echo the value of KEY from an env file (last assignment wins), surrounding
+# whitespace/quotes stripped. Empty if the file or key is absent. cut -f2-
+# keeps everything after the first '=' so values like REDIS_URL survive.
+env_val() {
+  env_file="$1/.env"
+  key="$2"
+  [ -f "$env_file" ] || return 0
+  grep -E "^[[:space:]]*$key[[:space:]]*=" "$env_file" 2>/dev/null \
+    | tail -n1 | cut -d= -f2- | sed "s/^[[:space:]\"']*//; s/[[:space:]\"']*$//"
+}
+
 # Slots currently in use across all worktrees. Primary == 0.
 used_slots() {
   echo 0
@@ -383,7 +394,7 @@ provision_dev_role() {
     return 0
   fi
   user=${USER:-$(id -un)}
-  if [ "$(svc_run psql -h "$SVC_RUNTIME_DIR" -p "$PG_PORT" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$user'" 2>/dev/null)" != "1" ]; then
+  if [ "$(svc_run psql -X -h "$SVC_RUNTIME_DIR" -p "$PG_PORT" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$user'" 2>/dev/null)" != "1" ]; then
     svc_run createdb -h "$SVC_RUNTIME_DIR" -p "$PG_PORT" "$user" >/dev/null 2>&1 \
       && echo "    Created convenience database '$user'" || true
   fi
@@ -490,47 +501,128 @@ cmd_adopt() {
   fi
 }
 
-ROW_FMT='%-4s  %-22s  %-5s  %-5s  %-5s  %-4s  %s\n'
+ROW_FMT='%-4s  %-22s  %-6s  %-14s  %s\n'
+
+# STATUS for a shared-contract worktree, by probing the shared cluster:
+# services-down (no shared Postgres) | db-missing (this slot's primary database
+# absent) | up. Probes the slot's OWN database existence — the unit a worktree
+# owns — not just daemon liveness.
+list_status_shared() {
+  wt="$1"
+  shared_up="$2"
+  [ "$shared_up" = 1 ] || { echo "services-down"; return 0; }
+  app=$(env_val "$wt" WORKTREE_APP)
+  [ -n "$app" ] || { echo "no-app"; return 0; }
+  suffix=$(env_val "$wt" WORKTREE_DB_SUFFIX)
+  if [ "$(svc_run psql -X -h "$SVC_RUNTIME_DIR" -p "$PG_PORT" -d postgres -tAc \
+        "SELECT 1 FROM pg_database WHERE datname='${app}_development${suffix}'" 2>/dev/null)" = "1" ]; then
+    echo "up"
+  else
+    echo "db-missing"
+  fi
+}
 
 cmd_list() {
   main=$(main_worktree)
+  svc_ensure_registry
+  svc_load_config
+
+  # Probe the shared Postgres once, via its unix socket — WSL2 shares localhost,
+  # so a TCP probe could report an unrelated process as up.
+  shared_pg_up=0
+  svc_run pg_isready -h "$SVC_RUNTIME_DIR" -p "$PG_PORT" -q 2>/dev/null && shared_pg_up=1
+
+  # Legacy worktrees still probe their own per-slot socket; SOCK_PREFIX (mise
+  # [env]) namespaces it. Single quotes intentional — expand in the mise shell.
   runtime="${XDG_RUNTIME_DIR:-/tmp}"
-  # SOCK_PREFIX (mise.toml [env]) namespaces the socket dir; read it via mise
-  # so this script stays app-agnostic. Single quotes are intentional — the
-  # expansion must happen in the inner mise shell, not here.
   # shellcheck disable=SC2016
   sock_prefix=$( (cd "$main" && mise x -- sh -c 'printf %s "${SOCK_PREFIX}"') 2>/dev/null )
   [ -n "$sock_prefix" ] || sock_prefix=pm
+
   # shellcheck disable=SC2059  # ROW_FMT is a fixed format constant, not input
-  printf "$ROW_FMT" SLOT SLUG DB RED WEB PG PATH
+  printf "$ROW_FMT" SLOT SLUG WEB STATUS PATH
   worktree_paths | while read -r wt; do
     slug=$(slug_of_path "$wt"); [ -n "$slug" ] || slug="-"
     slot=$(slot_of_env "$wt")
     if [ -z "$slot" ]; then
-      # Primary has no .env but uses mise's slot-0 defaults; any other
-      # slot-less worktree (e.g. an unadopted Claude one) has no ports.
+      # Primary without a .env rides mise's slot-0 defaults; any other slot-less
+      # worktree (e.g. an unadopted Claude one) is unmanaged.
       if [ "$wt" = "$main" ]; then
         slot=0
       else
         # shellcheck disable=SC2059
-        printf "$ROW_FMT" "-" "$slug" "-" "-" "-" "-" "$wt"
+        printf "$ROW_FMT" "-" "$slug" "-" "unmanaged" "$wt"
         continue
       fi
     fi
-    read -r db_port redis_port web_port _ _ <<EOF
-$(ports_for_slot "$slot")
-EOF
-    # Probe this slot's OWN Postgres via its unix socket, not localhost TCP:
-    # under WSL2 localhost is shared across distros, so a TCP probe can report
-    # an unrelated process as "up". The socket dir is filesystem-local.
-    if pg_isready -h "$runtime/$sock_prefix-$slot" -p "$db_port" -q 2>/dev/null; then
-      pg=up
+
+    set -- $(ports_for_slot "$slot")
+    legacy_db_port=$1
+    web=$(env_val "$wt" PORT); [ -n "$web" ] || web=$3
+
+    contract=$(env_val "$wt" WORKTREE_SERVICES)
+    if [ "$contract" = "shared" ]; then
+      status=$(list_status_shared "$wt" "$shared_pg_up")
+    elif [ "$(svc_app_env "$wt" WORKTREE_SERVICES)" = "shared" ]; then
+      # The app has migrated but this worktree's .env predates it (its legacy
+      # keys still win via mise _.file precedence) — needs `worktree reprovision`.
+      status="stale-contract"
+    elif pg_isready -h "$runtime/$sock_prefix-$slot" -p "$legacy_db_port" -q 2>/dev/null; then
+      status="legacy:up"
     else
-      pg=down
+      status="legacy:down"
     fi
     # shellcheck disable=SC2059
-    printf "$ROW_FMT" "$slot" "$slug" "$db_port" "$redis_port" "$web_port" "$pg" "$wt"
+    printf "$ROW_FMT" "$slot" "$slug" "$web" "$status" "$wt"
   done || true
+
+  # A foreign Postgres can hold the shared port and silently accept worktrees'
+  # connections — Rails never passes through `services start`'s bind guard.
+  if [ "$shared_pg_up" != 1 ] && svc_run pg_isready -h 127.0.0.1 -p "$PG_PORT" -q 2>/dev/null; then
+    echo "! foreign Postgres holds :$PG_PORT (not the shared cluster) — stop it or change PG_PORT in $(svc_config_dir)/config"
+  fi
+}
+
+# Drop this worktree's exact namespaces from the SHARED cluster — never the
+# shared daemons. Reads the suffix + Redis index from the worktree's own .env
+# (never recomputed from the registry, which can drift) and drops the exact five
+# database names with no glob, so a prefix app (property_management_*) can never
+# catch a sibling app's databases.
+cleanup_shared() {
+  dest="$1"
+  app=$(env_val "$dest" WORKTREE_APP)
+  suffix=$(env_val "$dest" WORKTREE_DB_SUFFIX)
+  redis_db=$(env_val "$dest" REDIS_DB)
+  svc_ensure_registry
+  svc_load_config
+
+  echo "==> Dropping shared-services namespaces (app ${app:-?}, slot $(slot_of_env "$dest"))"
+  if [ -z "$app" ]; then
+    echo "    (no WORKTREE_APP in .env — skipping database cleanup)" >&2
+  elif svc_run pg_isready -h "$SVC_RUNTIME_DIR" -p "$PG_PORT" -q 2>/dev/null; then
+    for db in \
+      "${app}_development${suffix}" \
+      "${app}_development_cache${suffix}" \
+      "${app}_development_queue${suffix}" \
+      "${app}_development_cable${suffix}" \
+      "${app}_test${suffix}"; do
+      if svc_run psql -X -h "$SVC_RUNTIME_DIR" -p "$PG_PORT" -d postgres \
+           -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE)" >/dev/null 2>&1; then
+        echo "    Dropped $db"
+      fi
+    done
+  else
+    echo "    (shared Postgres down — skipped database drop)"
+  fi
+
+  # Redis: flush only this slot's DB index. Warn first if a client is still on
+  # it — a zombie Sidekiq would otherwise contaminate the slot when it's reused.
+  sock="$SVC_RUNTIME_DIR/redis.sock"
+  if [ -n "$redis_db" ] && [ -S "$sock" ] && svc_run redis-cli -s "$sock" ping >/dev/null 2>&1; then
+    clients=$(svc_run redis-cli -s "$sock" CLIENT LIST 2>/dev/null | grep -c " db=$redis_db " || true)
+    [ "${clients:-0}" -gt 0 ] && echo "    Warning: $clients live Redis client(s) on db $redis_db (zombie process?)"
+    svc_run redis-cli -s "$sock" -n "$redis_db" FLUSHDB >/dev/null 2>&1 && echo "    Flushed Redis db $redis_db"
+  fi
 }
 
 cmd_rm() {
@@ -553,8 +645,15 @@ cmd_rm() {
 
   branch=$(git -C "$dest" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
 
-  echo "==> Stopping services in $dest"
-  (cd "$dest" && mise run stop) || true
+  # Shared-services worktrees: drop just this worktree's namespaces; the shared
+  # daemons stay up for every other worktree. Legacy worktrees stop their own
+  # per-worktree daemons as before.
+  if [ "$(env_val "$dest" WORKTREE_SERVICES)" = "shared" ]; then
+    cleanup_shared "$dest"
+  else
+    echo "==> Stopping services in $dest"
+    (cd "$dest" && mise run stop) || true
+  fi
 
   # Drop the gitignored artifacts provision() planted; otherwise every adopted
   # worktree (Claude ones included) would carry untracked files and force a
