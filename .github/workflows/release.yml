@@ -17,7 +17,8 @@ jobs:
       - name: Package per-platform tarballs
         run: |
           ver="${GITHUB_REF_NAME}"
-          mkdir -p dist
+          # Clean slate so no stale artifact from a previous build can ship.
+          rm -rf dist && mkdir -p dist
           # `worktree` is a platform-agnostic POSIX shell script, but ubi
           # resolves a release asset by matching the host target triple. Ship
           # the same script under each triple so every platform finds a match.
@@ -33,6 +34,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz \
+          gh release create "${GITHUB_REF_NAME}" dist/worktree-"${GITHUB_REF_NAME}"-*.tar.gz \
             --title "${GITHUB_REF_NAME}" \
             --notes "worktree ${GITHUB_REF_NAME}"
