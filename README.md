@@ -1,8 +1,15 @@
 # worktree-tools
 
-`worktree` — manage git worktrees with isolated dev services. Each worktree
-gets a unique **slot** that drives a non-colliding port set (Postgres, Redis,
-web, Mailpit), so several worktrees run their own stack at once.
+`worktree` — manage git worktrees with isolated dev services. Each worktree gets
+a unique **slot** N (the primary checkout is slot 0). Two isolation models:
+
+- **Shared services** *(current)* — one Postgres + one Redis + one Mailpit per
+  machine, shared by every worktree of every app; worktrees isolate by
+  **namespace** (a per-app+slot database suffix and a Redis DB index) instead of
+  by port. Opt in per app — see [Shared dev services](#shared-dev-services).
+- **Per-worktree port offsets** *(legacy)* — each worktree runs its own daemon
+  set on slot-derived ports (`BASE + slot * 10`). Still the default for apps that
+  haven't opted in, and byte-identical to before.
 
 Extracted from the [Fosa](https://github.com/propitech/fosa) Rails template so
 it lives in one place and is consumed by every app via [mise](https://mise.jdx.dev),
@@ -15,7 +22,7 @@ Add to a project's `mise.toml`:
 ```toml
 [tools]
 # `latest` tracks new releases on `mise install` / `mise up`; pin a version
-# (e.g. "1.0.0") instead if you want reproducible, explicit bumps.
+# (e.g. "2.0.0") instead if you want reproducible, explicit bumps.
 "github:propitech/worktree-tools" = { version = "latest", exe = "worktree" }
 ```
 
@@ -55,12 +62,15 @@ WORKTREE_BRANCH_PREFIX=ai bin/worktree add login   # ai/feat/login
 Precedence: `--prefix` wins, then `WORKTREE_BRANCH_PREFIX`, then empty. AI
 agents working in this repo are expected to set the namespace explicitly.
 
-### Port bases
+### Legacy: per-worktree port offsets
 
-Each slot's ports are `BASE + slot * 10`. The five slot-0 bases default to the
-values below and can be overridden per-repo via env (typically the app's
-`mise.toml` `[env]`), so an app that must run beside another on the same
-machine can shift its whole port range and never collide:
+Apps that have **not** opted into [shared services](#shared-dev-services) (no
+`WORKTREE_SERVICES=shared` in their `mise.toml [env]`) keep the original model:
+each worktree runs its own Postgres/Redis/Mailpit, and its slot's ports are
+`BASE + slot * 10`. The five slot-0 bases default to the values below and can be
+overridden per-repo via env (typically the app's `mise.toml` `[env]`), so an app
+that must run beside another on the same machine can shift its whole port range
+and never collide:
 
 ```sh
 DB_PORT_BASE         # default 5431  (Postgres)
@@ -156,10 +166,73 @@ into a slot (services stay down). Wire it in `.claude/settings.json`:
 There is deliberately no auto-remove counterpart — removal stays explicit
 (`bin/worktree rm <name>`).
 
+## Migrating an app to shared services
+
+When an app's `mise.toml` + `database.yml` are updated to opt in
+(`WORKTREE_SERVICES=shared`, `WORKTREE_APP`, and the `WORKTREE_DB_SUFFIX`
+interpolation in `database.yml`), migrate the developer's machine **once**.
+Worktree *slot* databases are disposable — only the **primary** checkout's data
+is worth moving. Order matters: the shared Postgres defaults to the same port as
+the old per-repo primary (`5431`), so the old cluster must be stopped before the
+shared one starts.
+
+1. **Dump the primary's data** from the old per-repo cluster while it's still
+   running (its socket is under `$XDG_RUNTIME_DIR`, named `<SOCK_PREFIX>-0`):
+
+   ```sh
+   pg_dumpall -h "$XDG_RUNTIME_DIR/<sock_prefix>-0" -p 5431 > ~/worktree-migration.sql
+   ```
+
+2. **Stop the old per-worktree daemons** (in each worktree, on the
+   pre-migration revision — the migration PR deletes these tasks) and drop the
+   old per-repo data dir:
+
+   ```sh
+   mise run stop
+   rm -rf <repo>/.data
+   ```
+
+3. **Pull the app's migration PR**, then **start the shared services** (now that
+   the old cluster has freed the port):
+
+   ```sh
+   bin/worktree services start
+   ```
+
+4. **Restore** the primary's data into the shared cluster (its socket is printed
+   by `worktree services status`; default port `5431`):
+
+   ```sh
+   psql -h "$XDG_RUNTIME_DIR/propitech-dev" -p 5431 -d postgres < ~/worktree-migration.sql
+   ```
+
+5. **Reprovision in-flight worktrees** (WIP branches that can't be `rm` + `add`ed)
+   and recreate their disposable slot databases:
+
+   ```sh
+   bin/worktree reprovision    # per worktree; the primary reprovisions as slot 0
+   bin/setup                   # or: bin/rails db:prepare
+   ```
+
+`worktree list` flags anything left behind: a `stale-contract` worktree still
+needs `reprovision`; a `foreign` Postgres means an old per-repo daemon is still
+holding the shared port (stop it, or change `PG_PORT` in
+`~/.config/propitech-dev/config`).
+
+> **Backup note.** One shared cluster now holds every app's dev data, so a
+> careless wipe loses everything at once. A cheap safety net is a periodic
+> `pg_dumpall` of the shared data dir (`~/.local/state/propitech-dev/postgres`) —
+> tracked as a follow-up (PRO-133).
+
 ## Releases
 
 Tag `vX.Y.Z`; CI packages `worktree` into `worktree-vX.Y.Z.tar.gz` and attaches
 it to a GitHub release. `ubi` installs that asset.
+
+The shared-services model is a **behavioural change** and ships as **v2.0.0**.
+It is safe for unmigrated apps: the per-worktree `.env` contract is
+capability-gated (`WORKTREE_SERVICES=shared`), so an app that hasn't opted in
+behaves byte-identically to v1.x even on `version = "latest"`.
 
 ## License
 
