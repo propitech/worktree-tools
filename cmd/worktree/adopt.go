@@ -38,19 +38,6 @@ func cmdAdopt(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	if target == "" {
-		target = cwd
-	}
-	if _, err := os.Stat(target); err != nil {
-		fmt.Fprintf(stderr, "worktree adopt: %s not found\n", target)
-		return 1
-	}
-	target, err = filepath.Abs(target)
-	if err != nil {
-		fmt.Fprintf(stderr, "worktree adopt: %v\n", err)
-		return 1
-	}
-
 	mainPath, err := git.Main(cwd)
 	if err != nil {
 		fmt.Fprintf(stderr, "worktree adopt: %v\n", err)
@@ -63,15 +50,13 @@ func cmdAdopt(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	registered := false
-	for _, wt := range worktrees {
-		if wt == target {
-			registered = true
-			break
-		}
+	// No target adopts the current directory; otherwise accept a slug, name,
+	// path, or slot number — the same forms `rm` resolves.
+	if target == "" {
+		target = cwd
 	}
-	if !registered {
-		fmt.Fprintf(stderr, "worktree adopt: %s is not a git worktree\n", target)
+	target, ok := resolveWorktree("adopt", target, mainPath, worktrees, stderr)
+	if !ok {
 		return 1
 	}
 	if target == mainPath {

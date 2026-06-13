@@ -52,7 +52,7 @@ func TestResolveWorktree(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := resolveWorktree(tc.arg, mainPath, worktrees, io.Discard)
+			got, ok := resolveWorktree("rm", tc.arg, mainPath, worktrees, io.Discard)
 			if tc.want == "" {
 				if ok {
 					t.Errorf("resolveWorktree(%q) = %q, want failure", tc.arg, got)

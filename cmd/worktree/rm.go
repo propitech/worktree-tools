@@ -59,7 +59,7 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	dest, ok := resolveWorktree(target, mainPath, worktrees, stderr)
+	dest, ok := resolveWorktree("rm", target, mainPath, worktrees, stderr)
 	if !ok {
 		return 1
 	}
@@ -116,7 +116,7 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 // to stderr and returns ok=false. This is what lets rm reach Claude isolation
 // worktrees under .claude/worktrees/<name>, which don't follow the
 // <repo>-<slug> naming.
-func resolveWorktree(arg, mainPath string, worktrees []string, stderr io.Writer) (string, bool) {
+func resolveWorktree(cmd, arg, mainPath string, worktrees []string, stderr io.Writer) (string, bool) {
 	registered := make(map[string]bool, len(worktrees))
 	for _, wt := range worktrees {
 		registered[wt] = true
@@ -158,12 +158,12 @@ func resolveWorktree(arg, mainPath string, worktrees []string, stderr io.Writer)
 	case 1:
 		return matches[0], true
 	case 0:
-		fmt.Fprintf(stderr, "worktree rm: no worktree matches '%s'. Known worktrees:\n", arg)
+		fmt.Fprintf(stderr, "worktree %s: no worktree matches '%s'. Known worktrees:\n", cmd, arg)
 		for _, wt := range worktrees {
 			fmt.Fprintf(stderr, "  %s\n", wt)
 		}
 	default:
-		fmt.Fprintf(stderr, "worktree rm: '%s' matches multiple worktrees:\n", arg)
+		fmt.Fprintf(stderr, "worktree %s: '%s' matches multiple worktrees:\n", cmd, arg)
 		for _, wt := range matches {
 			fmt.Fprintf(stderr, "  %s\n", wt)
 		}
