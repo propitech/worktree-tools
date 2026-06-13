@@ -47,7 +47,7 @@ func cmdReprovision(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	dest, ok := resolveWorktree(target, mainPath, worktrees, stderr)
+	dest, ok := resolveWorktree("reprovision", target, mainPath, worktrees, stderr)
 	if !ok {
 		return 1
 	}
