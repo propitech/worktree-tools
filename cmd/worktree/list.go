@@ -43,17 +43,6 @@ func cmdList(_ []string, stdout, stderr io.Writer) int {
 	}
 
 	sharedUp := services.SharedPgUp(runtimeDir, svcCfg.PGPort)
-
-	// SOCK_PREFIX for legacy socket probing — from the primary checkout's mise env.
-	sockPrefix := services.AppEnvVar(mainPath, "SOCK_PREFIX")
-	if sockPrefix == "" {
-		sockPrefix = "pm"
-	}
-	xdgRuntime := os.Getenv("XDG_RUNTIME_DIR")
-	if xdgRuntime == "" {
-		xdgRuntime = "/tmp"
-	}
-
 	portBases := ports.Load()
 
 	fmt.Fprintf(stdout, rowFmt, "SLOT", "SLUG", "WEB", "STATUS", "PATH")
@@ -88,19 +77,14 @@ func cmdList(_ []string, stdout, stderr io.Writer) int {
 		case contract == "shared":
 			status = sharedStatus(wt, runtimeDir, svcCfg.PGPort, sharedUp)
 		case services.AppEnvVar(wt, "WORKTREE_SERVICES") == "shared":
-			// .env predates the app's mise.toml migration — needs reprovision.
 			status = "stale-contract"
-		case services.LegacyPgUp(xdgRuntime, sockPrefix, slot, p.DB):
-			status = "legacy:up"
 		default:
-			status = "legacy:down"
+			status = "legacy"
 		}
 
 		fmt.Fprintf(stdout, rowFmt, strconv.Itoa(slot), slug, webPort, status, wt)
 	}
 
-	// A foreign Postgres on the shared TCP port can silently accept connections
-	// from worktrees that never went through `services start`.
 	if !sharedUp && services.TCPPgUp("127.0.0.1", svcCfg.PGPort) {
 		fmt.Fprintf(stdout, "! foreign Postgres holds :%d (not the shared cluster) — stop it or change PG_PORT in %s/config\n",
 			svcCfg.PGPort, services.ConfigDir())

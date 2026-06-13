@@ -16,7 +16,7 @@ func TestRunExitCodes(t *testing.T) {
 		{"no args", nil, 2},
 		{"version", []string{"--version"}, 0},
 		{"help", []string{"--help"}, 0},
-		{"recognised but unimplemented", []string{"add"}, 70},
+		{"recognised but unimplemented", []string{"services"}, 70},
 		{"unknown subcommand", []string{"bogus"}, 2},
 	}
 	for _, tc := range cases {
@@ -26,6 +26,27 @@ func TestRunExitCodes(t *testing.T) {
 				t.Errorf("run(%v) = %d, want %d", tc.args, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestAddMissingSlug(t *testing.T) {
+	t.Parallel()
+	if got := run([]string{"add"}, io.Discard, io.Discard); got != 2 {
+		t.Errorf("run([add]) with no slug = %d, want 2", got)
+	}
+}
+
+func TestAddSlugWithSlash(t *testing.T) {
+	t.Parallel()
+	if got := run([]string{"add", "foo/bar"}, io.Discard, io.Discard); got != 2 {
+		t.Errorf("run([add foo/bar]) = %d, want 2", got)
+	}
+}
+
+func TestAddUnknownFlag(t *testing.T) {
+	t.Parallel()
+	if got := run([]string{"add", "--bogus"}, io.Discard, io.Discard); got != 2 {
+		t.Errorf("run([add --bogus]) = %d, want 2", got)
 	}
 }
 
