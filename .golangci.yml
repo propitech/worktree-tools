@@ -1,0 +1,11 @@
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      # Writes to the user-facing stdout/stderr streams: a failed write is
+      # unactionable here, and checking every fmt.Fprint* return adds noise.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
