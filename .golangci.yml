@@ -9,3 +9,5 @@ linters:
         - fmt.Fprint
         - fmt.Fprintf
         - fmt.Fprintln
+        # Close on a file opened read-only: a failure is unactionable.
+        - (*os.File).Close
