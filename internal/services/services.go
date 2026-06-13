@@ -103,13 +103,6 @@ func TCPPgUp(host string, port int) bool {
 	return pgIsReady(host, port)
 }
 
-// LegacyPgUp probes the per-slot unix socket that legacy (non-shared) worktrees
-// use. sockPrefix is read from the primary worktree's mise env (SOCK_PREFIX).
-func LegacyPgUp(xdgRuntime, sockPrefix string, slot, dbPort int) bool {
-	socketDir := filepath.Join(xdgRuntime, fmt.Sprintf("%s-%d", sockPrefix, slot))
-	return pgIsReady(socketDir, dbPort)
-}
-
 func pgIsReady(host string, port int) bool {
 	cmd := exec.Command("pg_isready", "-h", host, "-p", strconv.Itoa(port), "-q")
 	return cmd.Run() == nil
