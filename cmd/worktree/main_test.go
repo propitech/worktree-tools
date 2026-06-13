@@ -45,6 +45,16 @@ func TestAdoptNotAWorktree(t *testing.T) {
 	}
 }
 
+func TestAutoadoptOutsideWorktreeIsNoop(t *testing.T) {
+	// Outside a .claude/worktrees/* path autoadopt is a silent no-op that always
+	// succeeds, so the SessionStart hook never aborts a shell. t.Chdir forbids
+	// t.Parallel.
+	t.Chdir(t.TempDir())
+	if got := run([]string{"autoadopt"}, io.Discard, io.Discard); got != 0 {
+		t.Errorf("run([autoadopt]) outside worktree = %d, want 0", got)
+	}
+}
+
 func TestAddMissingSlug(t *testing.T) {
 	t.Parallel()
 	if got := run([]string{"add"}, io.Discard, io.Discard); got != 2 {
