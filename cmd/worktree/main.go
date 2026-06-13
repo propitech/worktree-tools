@@ -1,9 +1,9 @@
 // Command worktree manages git worktrees backed by shared dev services.
 //
-// This is the Go rewrite (v2) of the POSIX-sh `worktree` script. Subcommands are
-// ported incrementally (PRO-135+); until one lands here it returns an
-// unimplemented status and the shell script remains the source of truth, so the
-// `mise exec -- worktree` binstub keeps working throughout the migration.
+// This is the Go rewrite (v2) of the POSIX-sh `worktree` script. Every
+// subcommand (add, adopt, autoadopt, list, rm, reprovision, services) is now
+// ported (PRO-135), so this binary is the source of truth; the `mise exec --
+// worktree` binstub dispatches to it.
 package main
 
 import (

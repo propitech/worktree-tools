@@ -20,16 +20,6 @@ func TestServicesUnknownAction(t *testing.T) {
 	}
 }
 
-func TestServicesStartNotYetPorted(t *testing.T) {
-	t.Parallel()
-	// start/stop land in a later PR; until then they report unimplemented.
-	for _, action := range []string{"start", "stop"} {
-		if got := run([]string{"services", action}, io.Discard, io.Discard); got != 70 {
-			t.Errorf("run([services %s]) = %d, want 70", action, got)
-		}
-	}
-}
-
 func TestServicesStatusReportsHealth(t *testing.T) {
 	t.Parallel()
 	// status is read-only and always exits 0; probes fail gracefully to "down"
