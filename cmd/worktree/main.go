@@ -3,7 +3,8 @@
 // This is the Go rewrite (v2) of the POSIX-sh `worktree` script. Every
 // subcommand (add, adopt, autoadopt, list, rm, reprovision, services) is now
 // ported (PRO-135), so this binary is the source of truth; the `mise exec --
-// worktree` binstub dispatches to it.
+// worktree` binstub dispatches to it. cd and run are Go-era additions: cd opens
+// a subshell in a worktree, run executes a command inside one via mise.
 package main
 
 import (
@@ -15,11 +16,13 @@ import (
 // version is overridden at build time via -ldflags "-X main.version=<tag>".
 var version = "dev"
 
-const usage = `usage: worktree {add|adopt|autoadopt|list|rm|reprovision|services} ...
+const usage = `usage: worktree {add|adopt|autoadopt|cd|run|list|rm|reprovision|services} ...
 
   add <slug> [<type>] [--no-start] [--prefix <ns>]
   adopt [<path>] [--start]
   autoadopt
+  cd <slug|name|path|slot>
+  run <slug|name|path|slot> <cmd> [args...]
   list
   rm <slug|name|path|slot> [--delete-branch] [--force]
   reprovision [<target>]
@@ -52,6 +55,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdAdopt(args[1:], stdout, stderr)
 	case "autoadopt":
 		return cmdAutoadopt(args[1:], stdout, stderr)
+	case "cd":
+		return cmdCd(args[1:], stdout, stderr)
+	case "run":
+		return cmdRun(args[1:], stdout, stderr)
 	case "rm":
 		return cmdRm(args[1:], stdout, stderr)
 	case "reprovision":
