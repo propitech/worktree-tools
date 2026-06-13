@@ -87,6 +87,45 @@ func Add(from, dest, branch string, w io.Writer) error {
 	return cmd.Run()
 }
 
+// CurrentBranch returns the abbreviated branch name checked out in dir, or
+// "HEAD" when the worktree is detached. Returns "" if git cannot report it
+// (e.g. the path is gone).
+func CurrentBranch(dir string) string {
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Remove unregisters the linked worktree at dest. With force it passes
+// --force, dropping the worktree even with uncommitted changes. git is run
+// from dir and its output is written to w.
+func Remove(dir, dest string, force bool, w io.Writer) error {
+	args := []string{"worktree", "remove"}
+	if force {
+		args = append(args, "--force")
+	}
+	args = append(args, dest)
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Stdout = w
+	cmd.Stderr = w
+	return cmd.Run()
+}
+
+// DeleteBranch force-deletes branch (git branch -D). git is run from dir and
+// its output is written to w.
+func DeleteBranch(dir, branch string, w io.Writer) error {
+	cmd := exec.Command("git", "branch", "-D", branch)
+	cmd.Dir = dir
+	cmd.Stdout = w
+	cmd.Stderr = w
+	return cmd.Run()
+}
+
 func porcelain(dir string) (string, error) {
 	cmd := exec.Command("git", "worktree", "list", "--porcelain")
 	cmd.Dir = dir
