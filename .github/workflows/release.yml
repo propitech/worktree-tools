@@ -8,27 +8,39 @@ on:
 permissions:
   contents: write
 
+env:
+  # Keep in sync with go.mod, mise.toml, and ci.yml.
+  GO_VERSION: "1.26.4"
+
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
 
-      - name: Package per-platform tarballs
+      - name: Build per-platform binaries
         run: |
           ver="${GITHUB_REF_NAME}"
           # Clean slate so no stale artifact from a previous build can ship.
           rm -rf dist && mkdir -p dist
-          # `worktree` is a platform-agnostic POSIX shell script, but ubi
-          # resolves a release asset by matching the host target triple. Ship
-          # the same script under each triple so every platform finds a match.
-          for triple in \
-            x86_64-unknown-linux-gnu \
-            aarch64-unknown-linux-gnu \
-            x86_64-apple-darwin \
-            aarch64-apple-darwin; do
-            tar -czf "dist/worktree-${ver}-${triple}.tar.gz" worktree
-          done
+          # ubi resolves a release asset by matching the host target triple, so
+          # ship one tarball per triple, each containing the matching binary.
+          # The tag is stamped in via -ldflags so `worktree version` reports it.
+          build() {
+            triple="$1"; goos="$2"; goarch="$3"
+            out="dist/${triple}"
+            mkdir -p "$out"
+            GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
+              go build -ldflags "-X main.version=${ver}" -o "$out/worktree" ./cmd/worktree
+            tar -czf "dist/worktree-${ver}-${triple}.tar.gz" -C "$out" worktree
+          }
+          build x86_64-unknown-linux-gnu  linux  amd64
+          build aarch64-unknown-linux-gnu linux  arm64
+          build x86_64-apple-darwin       darwin amd64
+          build aarch64-apple-darwin      darwin arm64
 
       - name: Create GitHub release
         env:

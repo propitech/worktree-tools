@@ -22,7 +22,7 @@ Add to a project's `mise.toml`:
 ```toml
 [tools]
 # `latest` tracks new releases on `mise install` / `mise up`; pin a version
-# (e.g. "2.0.0") instead if you want reproducible, explicit bumps.
+# (e.g. "2.0.1") instead if you want reproducible, explicit bumps.
 "github:propitech/worktree-tools" = { version = "latest", exe = "worktree" }
 ```
 
