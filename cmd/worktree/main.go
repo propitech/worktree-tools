@@ -57,8 +57,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "reprovision":
 		return cmdReprovision(args[1:], stdout, stderr)
 	case "services":
-		fmt.Fprintf(stderr, "worktree: %q is not yet ported to the Go build; use the shell tool\n", args[0])
-		return 70 // EX_SOFTWARE — recognised subcommand, not implemented yet
+		return cmdServices(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "worktree: unknown subcommand %q\n", args[0])
 		return 2
