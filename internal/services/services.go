@@ -123,6 +123,41 @@ func DBExists(runtimeDir string, pgPort int, dbName string) bool {
 	return strings.TrimSpace(string(out)) == "1"
 }
 
+// DropDB drops dbName from the shared cluster with FORCE (terminating live
+// connections). Returns true when the DROP succeeds. IF EXISTS makes it a
+// no-op for already-absent databases — those still report success.
+func DropDB(runtimeDir string, pgPort int, dbName string) bool {
+	cmd := exec.Command("psql",
+		"-X", "-h", runtimeDir, "-p", strconv.Itoa(pgPort),
+		"-d", "postgres", "-c",
+		`DROP DATABASE IF EXISTS "`+dbName+`" WITH (FORCE)`)
+	return cmd.Run() == nil
+}
+
+// RedisUp reports whether the shared Redis answers PING on the unix socket.
+func RedisUp(sock string) bool {
+	if _, err := os.Stat(sock); err != nil {
+		return false
+	}
+	return exec.Command("redis-cli", "-s", sock, "ping").Run() == nil
+}
+
+// RedisClientsOnDB counts clients currently selected onto redis db index db —
+// a zombie Sidekiq would otherwise contaminate the slot when it's reused.
+func RedisClientsOnDB(sock string, db int) int {
+	out, err := exec.Command("redis-cli", "-s", sock, "CLIENT", "LIST").Output()
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(out), " db="+strconv.Itoa(db)+" ")
+}
+
+// RedisFlushDB flushes only the given redis db index. Returns true on success.
+func RedisFlushDB(sock string, db int) bool {
+	cmd := exec.Command("redis-cli", "-s", sock, "-n", strconv.Itoa(db), "FLUSHDB")
+	return cmd.Run() == nil
+}
+
 // RegistrySet atomically writes key=value to the machine registry, replacing
 // any existing entry for key.
 func RegistrySet(key, value string) error {
