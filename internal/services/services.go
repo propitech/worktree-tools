@@ -123,6 +123,70 @@ func DBExists(runtimeDir string, pgPort int, dbName string) bool {
 	return strings.TrimSpace(string(out)) == "1"
 }
 
+// RedisDatabases is the database count the shared Redis runs with — REDIS_DB =
+// app_base + slot, so each app owns a contiguous 16-slot band (64 apps).
+const RedisDatabases = 1024
+
+// VerifyRedis reports whether the shared Redis is the one we own: it must answer
+// PING on the unix socket AND report `databases == RedisDatabases` over TCP.
+// `redis-server --daemonize` exits 0 even when the TCP bind fails (a foreign
+// Redis squatting the port), and apps connect by TCP, so a socket-only check
+// would pass while apps hit the wrong server.
+func VerifyRedis(sock string, redisPort int) bool {
+	out, err := exec.Command("redis-cli", "-s", sock, "ping").Output()
+	if err != nil || strings.TrimSpace(string(out)) != "PONG" {
+		return false
+	}
+	out, err = exec.Command("redis-cli", "-h", "127.0.0.1", "-p", strconv.Itoa(redisPort),
+		"config", "get", "databases").Output()
+	if err != nil {
+		return false
+	}
+	// `config get` returns the key then the value; the value is the last field.
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return false
+	}
+	return fields[len(fields)-1] == strconv.Itoa(RedisDatabases)
+}
+
+// RedisForeignUp reports whether some Redis answers PING on the shared TCP port
+// — used to flag a foreign Redis squatting it.
+func RedisForeignUp(redisPort int) bool {
+	return exec.Command("redis-cli", "-h", "127.0.0.1", "-p", strconv.Itoa(redisPort), "ping").Run() == nil
+}
+
+// MailpitRunning reports whether our mailpit is alive. Mailpit has no unix
+// socket, so health is pidfile + liveness + a process-name check guarding
+// against pid reuse.
+func MailpitRunning(runtimeDir string) bool {
+	data, err := os.ReadFile(filepath.Join(runtimeDir, "mailpit.pid"))
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		return false
+	}
+	return strings.Contains(procComm(pid), "mailpit")
+}
+
+// procComm returns the process command name for pid, portably: /proc on Linux
+// (WSL2), ps elsewhere (macOS).
+func procComm(pid int) string {
+	if data, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid)); err == nil {
+		return strings.TrimSpace(string(data))
+	}
+	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // DropDB drops dbName from the shared cluster with FORCE (terminating live
 // connections). Returns true when the DROP succeeds. IF EXISTS makes it a
 // no-op for already-absent databases — those still report success.

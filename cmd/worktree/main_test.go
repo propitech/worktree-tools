@@ -16,7 +16,6 @@ func TestRunExitCodes(t *testing.T) {
 		{"no args", nil, 2},
 		{"version", []string{"--version"}, 0},
 		{"help", []string{"--help"}, 0},
-		{"recognised but unimplemented", []string{"services"}, 70},
 		{"unknown subcommand", []string{"bogus"}, 2},
 	}
 	for _, tc := range cases {
