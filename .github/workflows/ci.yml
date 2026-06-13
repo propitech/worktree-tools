@@ -28,9 +28,10 @@ jobs:
           fi
       - name: go vet
         run: go vet ./...
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          # v7 installs golangci-lint v2; pin to match mise.toml + the runner-go image.
+          version: v2.12.2
 
   test:
     runs-on: ubuntu-latest
