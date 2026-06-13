@@ -48,7 +48,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdList(args[1:], stdout, stderr)
 	case "add":
 		return cmdAdd(args[1:], stdout, stderr)
-	case "adopt", "autoadopt", "rm", "reprovision", "services":
+	case "adopt":
+		return cmdAdopt(args[1:], stdout, stderr)
+	case "autoadopt", "rm", "reprovision", "services":
 		fmt.Fprintf(stderr, "worktree: %q is not yet ported to the Go build; use the shell tool\n", args[0])
 		return 70 // EX_SOFTWARE — recognised subcommand, not implemented yet
 	default:

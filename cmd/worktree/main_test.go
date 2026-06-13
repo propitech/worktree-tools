@@ -16,7 +16,7 @@ func TestRunExitCodes(t *testing.T) {
 		{"no args", nil, 2},
 		{"version", []string{"--version"}, 0},
 		{"help", []string{"--help"}, 0},
-		{"recognised but unimplemented", []string{"services"}, 70},
+		{"recognised but unimplemented", []string{"rm"}, 70},
 		{"unknown subcommand", []string{"bogus"}, 2},
 	}
 	for _, tc := range cases {
@@ -26,6 +26,22 @@ func TestRunExitCodes(t *testing.T) {
 				t.Errorf("run(%v) = %d, want %d", tc.args, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestAdoptUnknownFlag(t *testing.T) {
+	t.Parallel()
+	if got := run([]string{"adopt", "--bogus"}, io.Discard, io.Discard); got != 2 {
+		t.Errorf("run([adopt --bogus]) = %d, want 2", got)
+	}
+}
+
+func TestAdoptNotAWorktree(t *testing.T) {
+	t.Parallel()
+	// A path that exists but is not a registered git worktree.
+	dir := t.TempDir()
+	if got := run([]string{"adopt", dir}, io.Discard, io.Discard); got != 1 {
+		t.Errorf("run([adopt <non-worktree>]) = %d, want 1", got)
 	}
 }
 
