@@ -111,6 +111,24 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// resolveTarget is the cwd-aware wrapper around resolveWorktree: it reads the
+// repo's worktree topology starting from cwd, then maps arg to a worktree path.
+// It is the entry point for commands (cd, run) that only need the resolved path
+// and not the surrounding topology. cmd names the caller for error messages.
+func resolveTarget(cmd, arg, cwd string, stderr io.Writer) (string, bool) {
+	mainPath, err := git.Main(cwd)
+	if err != nil {
+		fmt.Fprintf(stderr, "worktree %s: %v\n", cmd, err)
+		return "", false
+	}
+	worktrees, err := git.Worktrees(cwd)
+	if err != nil {
+		fmt.Fprintf(stderr, "worktree %s: %v\n", cmd, err)
+		return "", false
+	}
+	return resolveWorktree(cmd, arg, mainPath, worktrees, stderr)
+}
+
 // resolveWorktree maps a slug | worktree dir name | path | slot number to a
 // single registered worktree path. On miss or ambiguity it prints candidates
 // to stderr and returns ok=false. This is what lets rm reach Claude isolation

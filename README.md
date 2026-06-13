@@ -40,11 +40,29 @@ exec mise exec -- worktree "$@"
 bin/worktree add <slug> [<type>] [--no-start] [--prefix <ns>]   # create + boot on own ports
 bin/worktree list                                   # slots, slugs, web port, per-worktree status
 bin/worktree adopt [<path>] [--start]               # adopt an existing worktree
+bin/worktree cd <slug|name|path|slot>               # open a subshell in a worktree
+bin/worktree run <slug|name|path|slot> <cmd> [args...]   # run a command in a worktree (via mise)
 bin/worktree rm <slug|name|path|slot> [--delete-branch] [--force]
 bin/worktree autoadopt                              # SessionStart hook entry point
 bin/worktree reprovision [<target>]                 # rewrite a worktree's .env to the current contract
 bin/worktree services <start|stop|status>           # shared dev daemons (one set per machine)
 ```
+
+`cd`, `run`, `rm`, and `reprovision` all accept the same target forms: a slot
+number (`0` is the primary checkout), the worktree directory name, a legacy
+`<repo>-<slug>` slug, or a path.
+
+```sh
+bin/worktree cd pro-169            # drops you into a subshell in that worktree; `exit` returns
+bin/worktree run 3 rails db:migrate   # runs in slot 3 with its .env loaded (PORT, DB suffix, …)
+bin/worktree run pm-login bin/rspec   # name target; command after it
+```
+
+`cd` opens an interactive subshell because a child process cannot change its
+parent shell's working directory. `run` executes the command through
+`mise exec --` from the worktree's directory, so the worktree's slot `.env` is
+loaded exactly as it is for `mise run start`; the command's exit code is
+propagated.
 
 ### Branch namespace
 
