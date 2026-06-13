@@ -1,6 +1,13 @@
 // Package git inspects the repo's worktree topology via `git worktree list`.
 // The primary working tree (slot 0) is the first entry and holds the real .git
 // dir; bin/worktree creates siblings named "<repo>-<slug>".
+//
+// We shell out to the git binary rather than use a Go git library: go-git has
+// no support for linked worktrees — it can neither enumerate them
+// (`git worktree list`) nor create/remove them (`git worktree add|remove`),
+// which are the tool's core operations. A pure-Go library would only cover
+// ancillary reads, so it would add a heavy dependency without removing the git
+// dependency. The git CLI is already a hard requirement of the tool.
 package git
 
 import (
