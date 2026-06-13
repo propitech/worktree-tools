@@ -1,6 +1,7 @@
-// Package services reads the machine-global propitech-dev config and probes
-// shared service daemons (Postgres, Redis). The config directory follows XDG
-// conventions: ~/.config/propitech-dev by default.
+// Package services reads and writes the machine-global propitech-dev config,
+// probes shared service daemons (Postgres, Redis), and allocates per-app slot
+// bases in the machine registry. The config directory follows XDG conventions:
+// ~/.config/propitech-dev by default.
 package services
 
 import (
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // ConfigDir returns the machine-global propitech-dev config directory,
@@ -126,6 +128,131 @@ func DBExists(runtimeDir string, pgPort int, dbName string) bool {
 		return false
 	}
 	return strings.TrimSpace(string(out)) == "1"
+}
+
+// RegistrySet atomically writes key=value to the machine registry, replacing
+// any existing entry for key.
+func RegistrySet(key, value string) error {
+	cfg := ConfigDir()
+	if err := os.MkdirAll(cfg, 0o755); err != nil {
+		return err
+	}
+	reg := filepath.Join(cfg, "registry")
+	tmp := reg + ".tmp." + strconv.Itoa(os.Getpid())
+
+	var lines []string
+	if f, err := os.Open(reg); err == nil {
+		sc := bufio.NewScanner(f)
+		prefix := key + "="
+		for sc.Scan() {
+			if l := sc.Text(); !strings.HasPrefix(l, prefix) {
+				lines = append(lines, l)
+			}
+		}
+		f.Close()
+	}
+	lines = append(lines, key+"="+value)
+
+	data := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(tmp, []byte(data), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, reg)
+}
+
+// EnsureRegistry ensures SVC_DATA_DIR and SVC_RUNTIME_DIR are recorded in the
+// machine registry, initialising them from XDG conventions on first use.
+// Returns (dataDir, runtimeDir).
+func EnsureRegistry() (dataDir, runtimeDir string) {
+	dataDir = RegistryGet("SVC_DATA_DIR")
+	runtimeDir = RegistryGet("SVC_RUNTIME_DIR")
+	if dataDir == "" {
+		stateHome := os.Getenv("XDG_STATE_HOME")
+		if stateHome == "" {
+			stateHome = filepath.Join(os.Getenv("HOME"), ".local", "state")
+		}
+		dataDir = filepath.Join(stateHome, "propitech-dev")
+		_ = RegistrySet("SVC_DATA_DIR", dataDir)
+	}
+	if runtimeDir == "" {
+		xdg := os.Getenv("XDG_RUNTIME_DIR")
+		if xdg == "" {
+			xdg = "/tmp"
+		}
+		runtimeDir = filepath.Join(xdg, "propitech-dev")
+		_ = RegistrySet("SVC_RUNTIME_DIR", runtimeDir)
+	}
+	return dataDir, runtimeDir
+}
+
+// AppBase returns the per-app Redis DB index base (stride 16), allocated once
+// in the machine registry and stable thereafter. The machine config lock
+// serialises concurrent allocation so each app gets a unique band.
+func AppBase(app string) (int, error) {
+	key := "APP_BASE_" + app
+	if v := RegistryGet(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n, nil
+		}
+	}
+	cfg := ConfigDir()
+	if err := os.MkdirAll(cfg, 0o755); err != nil {
+		return 0, err
+	}
+	lf, err := os.OpenFile(filepath.Join(cfg, "lock"), os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	defer lf.Close()
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+		return 0, err
+	}
+	defer func() { _ = syscall.Flock(int(lf.Fd()), syscall.LOCK_UN) }()
+
+	if v := RegistryGet(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n, nil
+		}
+	}
+
+	reg := filepath.Join(cfg, "registry")
+	n := 0
+	if f, err := os.Open(reg); err == nil {
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			if strings.HasPrefix(sc.Text(), "APP_BASE_") {
+				n++
+			}
+		}
+		f.Close()
+	}
+	base := n * 16
+	if err := RegistrySet(key, strconv.Itoa(base)); err != nil {
+		return 0, err
+	}
+	return base, nil
+}
+
+// CreateDevDB creates the user's convenience database on the shared Postgres
+// cluster if it doesn't already exist. Best-effort; silently skipped on error.
+func CreateDevDB(runtimeDir string, pgPort int) {
+	user := os.Getenv("USER")
+	if user == "" {
+		if out, err := exec.Command("id", "-un").Output(); err == nil {
+			user = strings.TrimSpace(string(out))
+		}
+	}
+	if user == "" {
+		return
+	}
+	cmd := exec.Command("psql", "-X", "-h", runtimeDir, "-p", strconv.Itoa(pgPort),
+		"-d", "postgres", "-tAc",
+		"SELECT 1 FROM pg_database WHERE datname='"+user+"'")
+	out, _ := cmd.Output()
+	if strings.TrimSpace(string(out)) == "1" {
+		return
+	}
+	_ = exec.Command("createdb", "-h", runtimeDir, "-p", strconv.Itoa(pgPort), user).Run()
 }
 
 // AppEnvVar reads a single variable from the app's resolved mise [env] at

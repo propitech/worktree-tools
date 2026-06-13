@@ -51,6 +51,86 @@ func TestRegistryGetMissingFile(t *testing.T) {
 	}
 }
 
+func TestRegistrySet(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	if err := RegistrySet("FOO", "bar"); err != nil {
+		t.Fatalf("RegistrySet: %v", err)
+	}
+	if got := RegistryGet("FOO"); got != "bar" {
+		t.Errorf("after set FOO=bar, got %q", got)
+	}
+
+	// overwrite — last value wins
+	if err := RegistrySet("FOO", "baz"); err != nil {
+		t.Fatalf("RegistrySet overwrite: %v", err)
+	}
+	if got := RegistryGet("FOO"); got != "baz" {
+		t.Errorf("after overwrite FOO=baz, got %q", got)
+	}
+
+	// second key doesn't clobber first
+	if err := RegistrySet("BAR", "qux"); err != nil {
+		t.Fatalf("RegistrySet BAR: %v", err)
+	}
+	if got := RegistryGet("FOO"); got != "baz" {
+		t.Errorf("FOO after BAR set = %q, want baz", got)
+	}
+	if got := RegistryGet("BAR"); got != "qux" {
+		t.Errorf("BAR = %q, want qux", got)
+	}
+}
+
+func TestEnsureRegistry(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("XDG_STATE_HOME", dir+"/state")
+	t.Setenv("XDG_RUNTIME_DIR", dir+"/run")
+	t.Setenv("HOME", dir+"/home")
+
+	data, runtime := EnsureRegistry()
+	if data == "" || runtime == "" {
+		t.Fatalf("EnsureRegistry returned empty paths: data=%q runtime=%q", data, runtime)
+	}
+	// stable: second call returns same paths
+	data2, runtime2 := EnsureRegistry()
+	if data2 != data || runtime2 != runtime {
+		t.Errorf("EnsureRegistry not stable: first=%q/%q second=%q/%q", data, runtime, data2, runtime2)
+	}
+}
+
+func TestAppBase(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	base0, err := AppBase("myapp")
+	if err != nil {
+		t.Fatalf("AppBase myapp: %v", err)
+	}
+	if base0 != 0 {
+		t.Errorf("first app base = %d, want 0", base0)
+	}
+
+	// stable for same app
+	base0again, err := AppBase("myapp")
+	if err != nil {
+		t.Fatalf("AppBase myapp again: %v", err)
+	}
+	if base0again != 0 {
+		t.Errorf("repeated AppBase = %d, want 0", base0again)
+	}
+
+	// second app gets stride-16 offset
+	base1, err := AppBase("otherapp")
+	if err != nil {
+		t.Fatalf("AppBase otherapp: %v", err)
+	}
+	if base1 != 16 {
+		t.Errorf("second app base = %d, want 16", base1)
+	}
+}
+
 func TestLoadConfig(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)

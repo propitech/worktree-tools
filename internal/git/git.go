@@ -12,6 +12,7 @@ package git
 
 import (
 	"errors"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -58,6 +59,32 @@ func SlugOf(main, path string) string {
 		return slug
 	}
 	return base
+}
+
+// CommonDir returns the absolute path to the shared git common directory (the
+// real .git dir shared across all linked worktrees).
+func CommonDir(from string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--git-common-dir")
+	cmd.Dir = from
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	p := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(from, p)
+	}
+	return p, nil
+}
+
+// Add creates a new linked worktree at dest on a new branch named branch.
+// Git progress output is written to w.
+func Add(from, dest, branch string, w io.Writer) error {
+	cmd := exec.Command("git", "worktree", "add", dest, "-b", branch)
+	cmd.Dir = from
+	cmd.Stdout = w
+	cmd.Stderr = w
+	return cmd.Run()
 }
 
 func porcelain(dir string) (string, error) {
