@@ -1,0 +1,27 @@
+# Dev toolchain for building/testing the Go rewrite (v2) of worktree-tools.
+# Consumers install the released binary via the github backend; this file is for
+# working ON this repo, not for using the tool.
+[tools]
+go = "1.26.4"
+"aqua:golangci/golangci-lint" = "latest"
+
+[tasks.build]
+description = "Build the worktree binary into dist/"
+run = "go build -o dist/worktree ./cmd/worktree"
+
+[tasks.test]
+description = "Run unit tests with the race detector + coverage"
+run = "go test -race -cover ./..."
+
+[tasks.lint]
+description = "gofmt check + go vet + golangci-lint"
+run = """
+#!/usr/bin/env bash
+set -e
+unformatted="$(gofmt -l .)"
+if [ -n "$unformatted" ]; then
+  echo "gofmt needed on:"; echo "$unformatted"; exit 1
+fi
+go vet ./...
+golangci-lint run ./...
+"""
