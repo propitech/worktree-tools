@@ -864,7 +864,7 @@ EOF
 [tools]
 postgres = "16"
 redis = "7.4"
-mailpit = "latest"
+"ubi:axllent/mailpit" = "latest"
 EOF
   fi
 }
