@@ -5,7 +5,7 @@
 // ported (PRO-135), so this binary is the source of truth; the `mise exec --
 // worktree` binstub dispatches to it. cd, run, and config are Go-era additions:
 // cd opens a subshell in a worktree, run executes a command inside one via
-// mise, and config show prints the configuration the tool resolves.
+// mise, and config show/set print and change the configuration the tool uses.
 package main
 
 import (
@@ -29,6 +29,7 @@ const usage = `usage: worktree {add|adopt|autoadopt|cd|run|list|rm|reprovision|s
   reprovision [<target>]
   services <start|stop|status>
   config show
+  config set <key> <value>
 `
 
 func main() {

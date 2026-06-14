@@ -47,6 +47,7 @@ bin/worktree autoadopt                              # SessionStart hook entry po
 bin/worktree reprovision [<target>]                 # rewrite a worktree's .env to the current contract
 bin/worktree services <start|stop|status>           # shared dev daemons (one set per machine)
 bin/worktree config show                            # print the effective configuration
+bin/worktree config set <key> <value>               # change a machine-global port or state dir
 ```
 
 `cd`, `run`, `rm`, and `reprovision` all accept the same target forms: a slot
@@ -161,6 +162,16 @@ endpoints** (shared Postgres / Redis / Mailpit host:port, with a Postgres
 reachability check), and **This worktree** (the current worktree's slot, app,
 services contract, DB suffix, web port, Redis DB, and owned databases — or a
 note when run outside a managed worktree).
+
+**`worktree config set <key> <value>`** changes one machine-global setting.
+Settable keys: the service ports `PG_PORT`, `REDIS_PORT`, `MAIL_SMTP_PORT`,
+`MAIL_UI_PORT` (written to `~/.config/propitech-dev/config`, validated as a port
+in 1–65535), and the shared state locations `SVC_DATA_DIR`, `SVC_RUNTIME_DIR`
+(written to the registry, must be an absolute path). Changes apply to the *next*
+service start: if the shared daemons are already running, the command warns that
+a `worktree services stop && worktree services start` is needed for the new
+value to take effect — it never auto-restarts. Repointing a state dir does not
+move existing data.
 
 On a shared-services app, **`worktree rm`** drops only that worktree's exact
 five databases (`<app>_development[_cache|_queue|_cable]<suffix>`, `<app>_test<suffix>`)

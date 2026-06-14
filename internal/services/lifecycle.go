@@ -125,6 +125,45 @@ func writeIfAbsent(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
+// SetConfigPort writes key=value into the machine config file, rewriting the
+// matching KEY= line in place (and preserving every other line and comment) or
+// appending it if absent. The file is seeded from defaults first when missing,
+// so a fresh machine gets a complete, commented file rather than a one-line stub.
+func SetConfigPort(key string, value int) error {
+	if err := WriteDefaults(); err != nil {
+		return err
+	}
+	path := filepath.Join(ConfigDir(), "config")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(data), "\n")
+	repl := fmt.Sprintf("%s=%d", key, value)
+	found := false
+	for i, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if k, _, ok := strings.Cut(t, "="); ok && strings.TrimSpace(k) == key {
+			lines[i] = repl
+			found = true
+			break
+		}
+	}
+	if !found {
+		// Insert before any trailing blank line so the file keeps one final newline.
+		if n := len(lines); n > 0 && lines[n-1] == "" {
+			lines[n-1] = repl
+			lines = append(lines, "")
+		} else {
+			lines = append(lines, repl)
+		}
+	}
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+}
+
 // Prepare ensures mise is present, the config dir and defaults exist, the
 // pinned tool versions are installed and trusted, and the data/runtime roots
 // are recorded. Returns the loaded config and resolved roots.
