@@ -168,6 +168,14 @@ unmigrated apps; it also flags a foreign Postgres squatting the shared port.
 inside a `.claude/worktrees/<name>` isolation worktree, it adopts the worktree
 into a slot (services stay down). Wire it in `.claude/settings.json`:
 
+It is **session-owned**: the Claude session id from the hook's stdin payload is
+recorded on first adopt (under the shared git common dir, in
+`claude-worktree-owners/<name>`). A later run by a *different* session refuses to
+adopt that worktree rather than re-claiming it, so two sessions never end up
+sharing — and trampling — one checkout. When no session id is available (a manual
+run, or an older hook payload), it falls back to the historical behaviour of
+adopting the current worktree.
+
 ```json
 {
   "hooks": {
