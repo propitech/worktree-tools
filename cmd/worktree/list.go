@@ -33,14 +33,7 @@ func cmdList(_ []string, stdout, stderr io.Writer) int {
 	}
 
 	svcCfg := services.LoadConfig()
-	runtimeDir := services.RegistryGet("SVC_RUNTIME_DIR")
-	if runtimeDir == "" {
-		xdg := os.Getenv("XDG_RUNTIME_DIR")
-		if xdg == "" {
-			xdg = "/tmp"
-		}
-		runtimeDir = filepath.Join(xdg, "propitech-dev")
-	}
+	runtimeDir := services.RuntimeDir()
 
 	sharedUp := services.SharedPgUp(runtimeDir, svcCfg.PGPort)
 	portBases := ports.Load()

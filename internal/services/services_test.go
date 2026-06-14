@@ -100,6 +100,49 @@ func TestEnsureRegistry(t *testing.T) {
 	}
 }
 
+func TestRuntimeAndDataDirCleanStoredValue(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	reg := filepath.Join(dir, "propitech-dev", "registry")
+	if err := os.MkdirAll(filepath.Dir(reg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A shell-era doubled-slash value, as written when XDG_RUNTIME_DIR ended
+	// in a trailing slash. Both readers must canonicalise it.
+	if err := os.WriteFile(reg, []byte("SVC_DATA_DIR=/home/a/.local/state//propitech-dev\nSVC_RUNTIME_DIR=/run/user/1000//propitech-dev\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := RuntimeDir(), "/run/user/1000/propitech-dev"; got != want {
+		t.Errorf("RuntimeDir = %q, want %q (cleaned)", got, want)
+	}
+	if got, want := DataDir(), "/home/a/.local/state/propitech-dev"; got != want {
+		t.Errorf("DataDir = %q, want %q (cleaned)", got, want)
+	}
+}
+
+func TestRuntimeAndDataDirFallbackDefaults(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // empty registry → fall back to XDG
+	t.Setenv("XDG_RUNTIME_DIR", "/run/user/1000/")
+	t.Setenv("XDG_STATE_HOME", "/state/")
+
+	if got, want := RuntimeDir(), "/run/user/1000/propitech-dev"; got != want {
+		t.Errorf("RuntimeDir fallback = %q, want %q", got, want)
+	}
+	if got, want := DataDir(), "/state/propitech-dev"; got != want {
+		t.Errorf("DataDir fallback = %q, want %q", got, want)
+	}
+}
+
+func TestRuntimeDirFallbackTmp(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_RUNTIME_DIR", "")
+	if got, want := RuntimeDir(), "/tmp/propitech-dev"; got != want {
+		t.Errorf("RuntimeDir with no XDG_RUNTIME_DIR = %q, want %q", got, want)
+	}
+}
+
 func TestAppBase(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)

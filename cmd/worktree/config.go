@@ -38,8 +38,8 @@ func configShow(stdout, stderr io.Writer) int {
 
 	svcCfg := services.LoadConfig()
 	configDir := services.ConfigDir()
-	dataDir := resolveDataDir()
-	runtimeDir := resolveRuntimeDir()
+	dataDir := services.DataDir()
+	runtimeDir := services.RuntimeDir()
 
 	fmt.Fprintln(stdout, "worktree config")
 
@@ -139,32 +139,6 @@ func containingWorktree(cwd, mainPath string) string {
 		return mainPath
 	}
 	return best
-}
-
-// resolveDataDir mirrors EnsureRegistry's data-dir resolution read-only: the
-// registry value if set, else the XDG default. Unlike EnsureRegistry it never
-// writes, so `config show` stays side-effect free.
-func resolveDataDir() string {
-	if d := services.RegistryGet("SVC_DATA_DIR"); d != "" {
-		return d
-	}
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		base = filepath.Join(os.Getenv("HOME"), ".local", "state")
-	}
-	return filepath.Join(base, "propitech-dev")
-}
-
-// resolveRuntimeDir mirrors EnsureRegistry's runtime-dir resolution read-only.
-func resolveRuntimeDir() string {
-	if d := services.RegistryGet("SVC_RUNTIME_DIR"); d != "" {
-		return d
-	}
-	base := os.Getenv("XDG_RUNTIME_DIR")
-	if base == "" {
-		base = "/tmp"
-	}
-	return filepath.Join(base, "propitech-dev")
 }
 
 func row(w io.Writer, label, value string) {
