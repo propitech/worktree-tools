@@ -60,6 +60,51 @@ func TestDatabaseNames(t *testing.T) {
 	}
 }
 
+func TestConfigSetRejects(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"wrong arity", []string{"config", "set", "PG_PORT"}},
+		{"unknown key", []string{"config", "set", "BOGUS", "1"}},
+		{"non-numeric port", []string{"config", "set", "PG_PORT", "abc"}},
+		{"port out of range", []string{"config", "set", "PG_PORT", "99999"}},
+		{"relative dir", []string{"config", "set", "SVC_DATA_DIR", "rel/path"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := run(tc.args, io.Discard, io.Discard); got != 2 {
+				t.Errorf("run(%v) = %d, want 2", tc.args, got)
+			}
+		})
+	}
+}
+
+func TestConfigSetPortPersists(t *testing.T) {
+	// t.Setenv forbids t.Parallel. Isolate the machine config in a temp dir.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if got := run([]string{"config", "set", "MAIL_UI_PORT", "8030"}, io.Discard, io.Discard); got != 0 {
+		t.Fatalf("config set MAIL_UI_PORT = %d, want 0", got)
+	}
+	var out strings.Builder
+	if run([]string{"config", "show"}, &out, io.Discard); !strings.Contains(out.String(), "8030") {
+		t.Errorf("config show did not reflect the set port:\n%s", out.String())
+	}
+}
+
+func TestConfigSetDirCleansAbsolute(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	if got := run([]string{"config", "set", "SVC_DATA_DIR", "/srv//state/"}, io.Discard, io.Discard); got != 0 {
+		t.Fatalf("config set SVC_DATA_DIR = %d, want 0", got)
+	}
+	var out strings.Builder
+	if run([]string{"config", "show"}, &out, io.Discard); !strings.Contains(out.String(), "/srv/state") {
+		t.Errorf("config show did not reflect the cleaned dir:\n%s", out.String())
+	}
+}
+
 func TestValueOr(t *testing.T) {
 	t.Parallel()
 	if valueOr("", "fallback") != "fallback" {

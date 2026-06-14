@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/propitech/worktree-tools/internal/env"
@@ -12,19 +13,94 @@ import (
 	"github.com/propitech/worktree-tools/internal/services"
 )
 
-// cmdConfig dispatches the `config` subcommand. Only `show` (the default) is
-// implemented; it prints the effective configuration the tool resolves,
-// grouped into Global / Worktree creation / Service endpoints / This worktree.
+// portKeys are the machine config-file ports `config set` accepts; dirKeys are
+// the registry-backed state locations. Both lists double as the validation
+// allowlist and the help text printed on an unknown key.
+var (
+	portKeys = []string{"PG_PORT", "REDIS_PORT", "MAIL_SMTP_PORT", "MAIL_UI_PORT"}
+	dirKeys  = []string{"SVC_DATA_DIR", "SVC_RUNTIME_DIR"}
+)
+
+// cmdConfig dispatches the `config` subcommand: `show` (the default) prints the
+// effective configuration; `set <key> <value>` writes a machine-global port or
+// state-location setting.
 func cmdConfig(args []string, stdout, stderr io.Writer) int {
 	action := "show"
 	if len(args) > 0 {
 		action = args[0]
 	}
-	if action != "show" {
-		fmt.Fprintf(stderr, "worktree config: unknown action %q (try: show)\n", action)
+	switch action {
+	case "show":
+		return configShow(stdout, stderr)
+	case "set":
+		return configSet(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "worktree config: unknown action %q (try: show, set)\n", action)
 		return 2
 	}
-	return configShow(stdout, stderr)
+}
+
+// configSet writes one machine-global setting. Port keys go to the config file,
+// directory keys to the registry. It captures whether the shared daemons are up
+// before applying the change so the post-write restart warning is accurate.
+func configSet(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 2 {
+		fmt.Fprint(stderr, "usage: worktree config set <key> <value>\n")
+		fmt.Fprintf(stderr, "  ports: %s\n", strings.Join(portKeys, ", "))
+		fmt.Fprintf(stderr, "  dirs:  %s\n", strings.Join(dirKeys, ", "))
+		return 2
+	}
+	key, val := args[0], args[1]
+
+	// Snapshot running state against the *current* (pre-change) port/runtime dir
+	// so a port/dir change doesn't make us probe the new, not-yet-live endpoint.
+	wasUp := services.SharedPgUp(services.RuntimeDir(), services.LoadConfig().PGPort)
+
+	switch {
+	case contains(portKeys, key):
+		n, err := strconv.Atoi(val)
+		if err != nil || n < 1 || n > 65535 {
+			fmt.Fprintf(stderr, "worktree config set: %s must be a port number in 1..65535\n", key)
+			return 2
+		}
+		if err := services.SetConfigPort(key, n); err != nil {
+			fmt.Fprintf(stderr, "worktree config set: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "set %s=%d in %s\n", key, n, filepath.Join(services.ConfigDir(), "config"))
+	case contains(dirKeys, key):
+		if !filepath.IsAbs(val) {
+			fmt.Fprintf(stderr, "worktree config set: %s must be an absolute path\n", key)
+			return 2
+		}
+		clean := filepath.Clean(val)
+		if err := services.RegistrySet(key, clean); err != nil {
+			fmt.Fprintf(stderr, "worktree config set: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "set %s=%s in the registry\n", key, clean)
+		fmt.Fprintf(stdout, "note: existing data is not moved — relocate the old %s contents manually if needed\n", key)
+	default:
+		fmt.Fprintf(stderr, "worktree config set: unknown key %q\n", key)
+		fmt.Fprintf(stderr, "  ports: %s\n", strings.Join(portKeys, ", "))
+		fmt.Fprintf(stderr, "  dirs:  %s\n", strings.Join(dirKeys, ", "))
+		return 2
+	}
+
+	if wasUp {
+		fmt.Fprintln(stdout, "warning: shared services are running — restart for the change to take effect:")
+		fmt.Fprintln(stdout, "  worktree services stop && worktree services start")
+	}
+	return 0
+}
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 const cfgRowFmt = "  %-16s %s\n"

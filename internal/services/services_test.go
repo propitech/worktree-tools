@@ -3,6 +3,7 @@ package services
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -140,6 +141,42 @@ func TestRuntimeDirFallbackTmp(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", "")
 	if got, want := RuntimeDir(), "/tmp/propitech-dev"; got != want {
 		t.Errorf("RuntimeDir with no XDG_RUNTIME_DIR = %q, want %q", got, want)
+	}
+}
+
+func TestSetConfigPort(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	// Fresh machine: file seeded from defaults, then one key changed.
+	if err := SetConfigPort("PG_PORT", 5500); err != nil {
+		t.Fatalf("SetConfigPort: %v", err)
+	}
+	cfg := LoadConfig()
+	if cfg.PGPort != 5500 {
+		t.Errorf("PGPort = %d, want 5500", cfg.PGPort)
+	}
+	// Other keys keep their template defaults — the rewrite is surgical.
+	if cfg.RedisPort != 6379 || cfg.MailSMTPPort != 1025 || cfg.MailUIPort != 8025 {
+		t.Errorf("untouched keys changed: %+v", cfg)
+	}
+
+	// The commented header survives the rewrite.
+	raw, err := os.ReadFile(filepath.Join(dir, "propitech-dev", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "# propitech-dev shared services") {
+		t.Errorf("comment header lost:\n%s", raw)
+	}
+
+	// A second change to a different key leaves the first intact.
+	if err := SetConfigPort("REDIS_PORT", 6400); err != nil {
+		t.Fatalf("SetConfigPort REDIS_PORT: %v", err)
+	}
+	cfg = LoadConfig()
+	if cfg.PGPort != 5500 || cfg.RedisPort != 6400 {
+		t.Errorf("after second set: %+v, want PG 5500 / Redis 6400", cfg)
 	}
 }
 
