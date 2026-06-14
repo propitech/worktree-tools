@@ -252,26 +252,45 @@ func RegistrySet(key, value string) error {
 	return os.Rename(tmp, reg)
 }
 
+// DataDir resolves the shared data directory read-only: the registry value if
+// recorded, else the XDG_STATE_HOME default (~/.local/state). The result is
+// always filepath.Clean'd, so a trailing-slash XDG var or a legacy doubled-slash
+// registry value (written by the shell-era script) renders canonically.
+func DataDir() string {
+	if d := RegistryGet("SVC_DATA_DIR"); d != "" {
+		return filepath.Clean(d)
+	}
+	base := os.Getenv("XDG_STATE_HOME")
+	if base == "" {
+		base = filepath.Join(os.Getenv("HOME"), ".local", "state")
+	}
+	return filepath.Join(base, "propitech-dev")
+}
+
+// RuntimeDir resolves the shared runtime directory read-only: the registry value
+// if recorded, else the XDG_RUNTIME_DIR default (/tmp when unset). Cleaned like
+// DataDir so a trailing-slash XDG_RUNTIME_DIR cannot leak a doubled slash.
+func RuntimeDir() string {
+	if d := RegistryGet("SVC_RUNTIME_DIR"); d != "" {
+		return filepath.Clean(d)
+	}
+	base := os.Getenv("XDG_RUNTIME_DIR")
+	if base == "" {
+		base = "/tmp"
+	}
+	return filepath.Join(base, "propitech-dev")
+}
+
 // EnsureRegistry ensures SVC_DATA_DIR and SVC_RUNTIME_DIR are recorded in the
 // machine registry, initialising them from XDG conventions on first use.
-// Returns (dataDir, runtimeDir).
+// Returns (dataDir, runtimeDir), both canonicalised via DataDir/RuntimeDir.
 func EnsureRegistry() (dataDir, runtimeDir string) {
-	dataDir = RegistryGet("SVC_DATA_DIR")
-	runtimeDir = RegistryGet("SVC_RUNTIME_DIR")
-	if dataDir == "" {
-		stateHome := os.Getenv("XDG_STATE_HOME")
-		if stateHome == "" {
-			stateHome = filepath.Join(os.Getenv("HOME"), ".local", "state")
-		}
-		dataDir = filepath.Join(stateHome, "propitech-dev")
+	dataDir = DataDir()
+	runtimeDir = RuntimeDir()
+	if RegistryGet("SVC_DATA_DIR") == "" {
 		_ = RegistrySet("SVC_DATA_DIR", dataDir)
 	}
-	if runtimeDir == "" {
-		xdg := os.Getenv("XDG_RUNTIME_DIR")
-		if xdg == "" {
-			xdg = "/tmp"
-		}
-		runtimeDir = filepath.Join(xdg, "propitech-dev")
+	if RegistryGet("SVC_RUNTIME_DIR") == "" {
 		_ = RegistrySet("SVC_RUNTIME_DIR", runtimeDir)
 	}
 	return dataDir, runtimeDir
