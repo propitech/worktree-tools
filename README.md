@@ -46,6 +46,7 @@ bin/worktree rm <slug|name|path|slot> [--delete-branch] [--force]
 bin/worktree autoadopt                              # SessionStart hook entry point
 bin/worktree reprovision [<target>]                 # rewrite a worktree's .env to the current contract
 bin/worktree services <start|stop|status>           # shared dev daemons (one set per machine)
+bin/worktree config show                            # print the effective configuration
 ```
 
 `cd`, `run`, `rm`, and `reprovision` all accept the same target forms: a slot
@@ -151,6 +152,15 @@ databases are `property_management_*`). `worktree add` aborts if it's missing.
 the current contract in place — for a worktree whose branch carries WIP (so
 `rm` + `add` isn't an option) or one written under the old contract. Defaults to
 the current worktree; the primary reprovisions as slot 0.
+
+**`worktree config show`** prints the effective configuration the tool resolves,
+read-only, in four sections: **Global** (config / data / runtime directories,
+branch prefix, default type), **Worktree creation** (the primary checkout, its
+parent, and the `<parent>/<repo>-<slug>` path new worktrees land at), **Service
+endpoints** (shared Postgres / Redis / Mailpit host:port, with a Postgres
+reachability check), and **This worktree** (the current worktree's slot, app,
+services contract, DB suffix, web port, Redis DB, and owned databases — or a
+note when run outside a managed worktree).
 
 On a shared-services app, **`worktree rm`** drops only that worktree's exact
 five databases (`<app>_development[_cache|_queue|_cable]<suffix>`, `<app>_test<suffix>`)
