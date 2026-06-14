@@ -3,8 +3,9 @@
 // This is the Go rewrite (v2) of the POSIX-sh `worktree` script. Every
 // subcommand (add, adopt, autoadopt, list, rm, reprovision, services) is now
 // ported (PRO-135), so this binary is the source of truth; the `mise exec --
-// worktree` binstub dispatches to it. cd and run are Go-era additions: cd opens
-// a subshell in a worktree, run executes a command inside one via mise.
+// worktree` binstub dispatches to it. cd, run, and config are Go-era additions:
+// cd opens a subshell in a worktree, run executes a command inside one via
+// mise, and config show prints the configuration the tool resolves.
 package main
 
 import (
@@ -16,7 +17,7 @@ import (
 // version is overridden at build time via -ldflags "-X main.version=<tag>".
 var version = "dev"
 
-const usage = `usage: worktree {add|adopt|autoadopt|cd|run|list|rm|reprovision|services} ...
+const usage = `usage: worktree {add|adopt|autoadopt|cd|run|list|rm|reprovision|services|config} ...
 
   add <slug> [<type>] [--no-start] [--prefix <ns>]
   adopt [<path>] [--start]
@@ -27,6 +28,7 @@ const usage = `usage: worktree {add|adopt|autoadopt|cd|run|list|rm|reprovision|s
   rm <slug|name|path|slot> [--delete-branch] [--force]
   reprovision [<target>]
   services <start|stop|status>
+  config show
 `
 
 func main() {
@@ -65,6 +67,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdReprovision(args[1:], stdout, stderr)
 	case "services":
 		return cmdServices(args[1:], stdout, stderr)
+	case "config":
+		return cmdConfig(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "worktree: unknown subcommand %q\n", args[0])
 		return 2
