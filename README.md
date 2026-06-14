@@ -37,7 +37,7 @@ exec mise exec -- worktree "$@"
 ## Usage
 
 ```sh
-bin/worktree add <slug> [<type>] [--no-start] [--prefix <ns>]   # create + boot on own ports
+bin/worktree add <slug> [<type>] [--no-start] [--prefix <ns>] [--root <dir>]   # create + boot on own ports
 bin/worktree list                                   # slots, slugs, web port, per-worktree status
 bin/worktree adopt [<path>] [--start]               # adopt an existing worktree
 bin/worktree cd <slug|name|path|slot>               # open a subshell in a worktree
@@ -166,12 +166,31 @@ note when run outside a managed worktree).
 **`worktree config set <key> <value>`** changes one machine-global setting.
 Settable keys: the service ports `PG_PORT`, `REDIS_PORT`, `MAIL_SMTP_PORT`,
 `MAIL_UI_PORT` (written to `~/.config/propitech-dev/config`, validated as a port
-in 1–65535), and the shared state locations `SVC_DATA_DIR`, `SVC_RUNTIME_DIR`
-(written to the registry, must be an absolute path). Changes apply to the *next*
-service start: if the shared daemons are already running, the command warns that
-a `worktree services stop && worktree services start` is needed for the new
-value to take effect — it never auto-restarts. Repointing a state dir does not
-move existing data.
+in 1–65535); the shared state locations `SVC_DATA_DIR`, `SVC_RUNTIME_DIR`
+(written to the registry, must be an absolute path); and the per-repo
+`WORKTREE_ROOT` (see below). Port/dir changes apply to the *next* service start:
+if the shared daemons are already running, the command warns that a
+`worktree services stop && worktree services start` is needed for the new value
+to take effect — it never auto-restarts. Repointing a state dir does not move
+existing data.
+
+### Where new worktrees are created
+
+By default `worktree add` places a worktree as a sibling of the primary
+checkout: `<parent>/<repo>-<slug>`. To put a repo's worktrees elsewhere, set a
+per-repo root:
+
+```sh
+worktree config set WORKTREE_ROOT /path/to/worktrees   # run inside the repo
+worktree add login --root /tmp/scratch                 # one-off override
+```
+
+Resolution precedence is `--root` flag → per-repo `WORKTREE_ROOT` → the sibling
+default. The root is created if absent. `WORKTREE_ROOT` is stored in the registry
+keyed by the clone's git common dir — **not** the repo name — so two same-named
+clones (forks) get independent roots and never collide on a shared
+`<repo>-<slug>` path. Worktrees keep the `<repo>-<slug>` basename wherever they
+live, so `cd` / `run` / `rm` / `list` resolve them by slug as usual.
 
 On a shared-services app, **`worktree rm`** drops only that worktree's exact
 five databases (`<app>_development[_cache|_queue|_cable]<suffix>`, `<app>_test<suffix>`)
