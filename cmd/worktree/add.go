@@ -21,6 +21,7 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	start := true
 	prefix := ""
 	prefixFromCLI := false
+	rootFlag := ""
 
 	for i := 0; i < len(args); i++ {
 		switch {
@@ -33,6 +34,11 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 		case strings.HasPrefix(args[i], "--prefix="):
 			prefix = strings.TrimPrefix(args[i], "--prefix=")
 			prefixFromCLI = true
+		case args[i] == "--root" && i+1 < len(args):
+			i++
+			rootFlag = args[i]
+		case strings.HasPrefix(args[i], "--root="):
+			rootFlag = strings.TrimPrefix(args[i], "--root=")
 		case strings.HasPrefix(args[i], "--"):
 			fmt.Fprintf(stderr, "worktree add: unknown flag %s\n", args[i])
 			return 2
@@ -44,11 +50,15 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	if slug == "" {
-		fmt.Fprint(stderr, "usage: worktree add <slug> [<type>] [--no-start] [--prefix <ns>]\n")
+		fmt.Fprint(stderr, "usage: worktree add <slug> [<type>] [--no-start] [--prefix <ns>] [--root <dir>]\n")
 		return 2
 	}
 	if strings.Contains(slug, "/") {
 		fmt.Fprintf(stderr, "worktree add: slug must not contain '/'\n")
+		return 2
+	}
+	if rootFlag != "" && !filepath.IsAbs(rootFlag) {
+		fmt.Fprintf(stderr, "worktree add: --root must be an absolute path\n")
 		return 2
 	}
 
@@ -69,8 +79,12 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	}
 
 	repo := filepath.Base(mainPath)
-	parent := filepath.Dir(mainPath)
-	dest := filepath.Join(parent, repo+"-"+slug)
+	// Root precedence: --root override → per-repo WORKTREE_ROOT → sibling default.
+	root := rootFlag
+	if root == "" {
+		root, _ = resolveWorktreeRoot(cwd, mainPath)
+	}
+	dest := filepath.Join(root, repo+"-"+slug)
 
 	var branch string
 	if prefix != "" {
@@ -117,6 +131,12 @@ func cmdAdd(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "==> Creating worktree %q (slot %d)\n", slug, sl)
 	fmt.Fprintf(stdout, "    path:   %s\n", dest)
 	fmt.Fprintf(stdout, "    branch: %s\n", branch)
+
+	// git worktree add creates only the leaf dir, so the chosen root must exist.
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		fmt.Fprintf(stderr, "worktree add: create root %s: %v\n", root, err)
+		return 1
+	}
 
 	if err := git.Add(cwd, dest, branch, stderr); err != nil {
 		fmt.Fprintf(stderr, "worktree add: git worktree add: %v\n", err)

@@ -13,6 +13,7 @@ func TestSlugOf(t *testing.T) {
 	cases := []struct{ path, want string }{
 		{"/home/me/app", ""},                                      // primary checkout
 		{"/home/me/app-lease-renewal", "lease-renewal"},           // add-slug sibling
+		{"/custom/root/app-login", "login"},                       // custom WORKTREE_ROOT, outside parent
 		{"/home/me/.claude/worktrees/curious-fox", "curious-fox"}, // bare basename
 		{"/elsewhere/app-feat/deep", "deep"},                      // no repo- prefix
 	}

@@ -6,6 +6,8 @@ package services
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -279,6 +281,26 @@ func RuntimeDir() string {
 		base = "/tmp"
 	}
 	return filepath.Join(base, "propitech-dev")
+}
+
+// RepoKey derives the registry key for a per-repo setting named name, namespaced
+// by the git common dir so two same-named clones (forks) never share a value.
+// The common dir is cleaned then hashed, keeping the flat-file key short and
+// free of path separators.
+func RepoKey(commonDir, name string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(commonDir)))
+	return name + "_" + hex.EncodeToString(sum[:])[:12]
+}
+
+// SetRepoValue records a per-repo setting in the machine registry, keyed by the
+// clone's common dir via RepoKey.
+func SetRepoValue(commonDir, name, value string) error {
+	return RegistrySet(RepoKey(commonDir, name), value)
+}
+
+// RepoValue reads a per-repo setting recorded by SetRepoValue, or "" if unset.
+func RepoValue(commonDir, name string) string {
+	return RegistryGet(RepoKey(commonDir, name))
 }
 
 // EnsureRegistry ensures SVC_DATA_DIR and SVC_RUNTIME_DIR are recorded in the

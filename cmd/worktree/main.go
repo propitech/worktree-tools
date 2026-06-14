@@ -19,7 +19,7 @@ var version = "dev"
 
 const usage = `usage: worktree {add|adopt|autoadopt|cd|run|list|rm|reprovision|services|config} ...
 
-  add <slug> [<type>] [--no-start] [--prefix <ns>]
+  add <slug> [<type>] [--no-start] [--prefix <ns>] [--root <dir>]
   adopt [<path>] [--start]
   autoadopt
   cd <slug|name|path|slot>

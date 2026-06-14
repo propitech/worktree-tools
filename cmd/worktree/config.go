@@ -19,6 +19,7 @@ import (
 var (
 	portKeys = []string{"PG_PORT", "REDIS_PORT", "MAIL_SMTP_PORT", "MAIL_UI_PORT"}
 	dirKeys  = []string{"SVC_DATA_DIR", "SVC_RUNTIME_DIR"}
+	repoKeys = []string{"WORKTREE_ROOT"}
 )
 
 // cmdConfig dispatches the `config` subcommand: `show` (the default) prints the
@@ -46,11 +47,17 @@ func cmdConfig(args []string, stdout, stderr io.Writer) int {
 func configSet(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 2 {
 		fmt.Fprint(stderr, "usage: worktree config set <key> <value>\n")
-		fmt.Fprintf(stderr, "  ports: %s\n", strings.Join(portKeys, ", "))
-		fmt.Fprintf(stderr, "  dirs:  %s\n", strings.Join(dirKeys, ", "))
+		printSetKeys(stderr)
 		return 2
 	}
 	key, val := args[0], args[1]
+
+	// WORKTREE_ROOT is per-repo (registry, keyed by clone identity), not a
+	// machine-global port/dir, so it has its own path and returns early — no
+	// services-restart warning, since placement never touches the daemons.
+	if contains(repoKeys, key) {
+		return configSetRepo(key, val, stdout, stderr)
+	}
 
 	// Snapshot running state against the *current* (pre-change) port/runtime dir
 	// so a port/dir change doesn't make us probe the new, not-yet-live endpoint.
@@ -82,8 +89,7 @@ func configSet(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "note: existing data is not moved — relocate the old %s contents manually if needed\n", key)
 	default:
 		fmt.Fprintf(stderr, "worktree config set: unknown key %q\n", key)
-		fmt.Fprintf(stderr, "  ports: %s\n", strings.Join(portKeys, ", "))
-		fmt.Fprintf(stderr, "  dirs:  %s\n", strings.Join(dirKeys, ", "))
+		printSetKeys(stderr)
 		return 2
 	}
 
@@ -92,6 +98,51 @@ func configSet(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "  worktree services stop && worktree services start")
 	}
 	return 0
+}
+
+// configSetRepo stores a per-repo setting (currently only WORKTREE_ROOT) in the
+// registry, namespaced by the current clone's git common dir.
+func configSetRepo(key, val string, stdout, stderr io.Writer) int {
+	if !filepath.IsAbs(val) {
+		fmt.Fprintf(stderr, "worktree config set: %s must be an absolute path\n", key)
+		return 2
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(stderr, "worktree config set: %v\n", err)
+		return 1
+	}
+	commonDir, err := git.CommonDir(cwd)
+	if err != nil {
+		fmt.Fprintf(stderr, "worktree config set: %s is per-repo — run inside a git repository\n", key)
+		return 1
+	}
+	clean := filepath.Clean(val)
+	if err := services.SetRepoValue(commonDir, key, clean); err != nil {
+		fmt.Fprintf(stderr, "worktree config set: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "set %s=%s for this repo (registry)\n", key, clean)
+	return 0
+}
+
+func printSetKeys(w io.Writer) {
+	fmt.Fprintf(w, "  ports: %s\n", strings.Join(portKeys, ", "))
+	fmt.Fprintf(w, "  dirs:  %s\n", strings.Join(dirKeys, ", "))
+	fmt.Fprintf(w, "  repo:  %s\n", strings.Join(repoKeys, ", "))
+}
+
+// resolveWorktreeRoot returns the directory new worktrees are created under and a
+// label for where the value came from. Precedence excludes the `add --root`
+// flag (applied by the caller): the per-repo WORKTREE_ROOT in the registry, else
+// the parent of the primary checkout (the default sibling layout).
+func resolveWorktreeRoot(cwd, mainPath string) (root, source string) {
+	if commonDir, err := git.CommonDir(cwd); err == nil {
+		if v := services.RepoValue(commonDir, "WORKTREE_ROOT"); v != "" {
+			return v, "repo config"
+		}
+	}
+	return filepath.Dir(mainPath), "default (sibling of primary)"
 }
 
 func contains(list []string, s string) bool {
@@ -138,10 +189,10 @@ func configShow(stdout, stderr io.Writer) int {
 		row(stdout, "primary checkout", "(not in a git repo)")
 	} else {
 		repo := filepath.Base(mainPath)
-		parent := filepath.Dir(mainPath)
+		root, source := resolveWorktreeRoot(cwd, mainPath)
 		row(stdout, "primary checkout", mainPath)
-		row(stdout, "parent dir", parent)
-		row(stdout, "new path", filepath.Join(parent, repo+"-<slug>"))
+		row(stdout, "worktrees root", fmt.Sprintf("%s  (%s)", root, source))
+		row(stdout, "new path", filepath.Join(root, repo+"-<slug>"))
 	}
 
 	// Service endpoints -----------------------------------------------------

@@ -105,6 +105,31 @@ func TestConfigSetDirCleansAbsolute(t *testing.T) {
 	}
 }
 
+func TestConfigSetWorktreeRoot(t *testing.T) {
+	// Per-repo root: relative rejected, absolute round-trips through show.
+	// Tests run inside this git worktree, so git.CommonDir resolves.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if got := run([]string{"config", "set", "WORKTREE_ROOT", "rel/path"}, io.Discard, io.Discard); got != 2 {
+		t.Errorf("relative WORKTREE_ROOT = %d, want 2", got)
+	}
+	if got := run([]string{"config", "set", "WORKTREE_ROOT", "/srv//wt/"}, io.Discard, io.Discard); got != 0 {
+		t.Fatalf("absolute WORKTREE_ROOT = %d, want 0", got)
+	}
+	var out strings.Builder
+	run([]string{"config", "show"}, &out, io.Discard)
+	if !strings.Contains(out.String(), "/srv/wt") || !strings.Contains(out.String(), "repo config") {
+		t.Errorf("config show did not reflect the per-repo root:\n%s", out.String())
+	}
+}
+
+func TestAddRelativeRootRejected(t *testing.T) {
+	t.Parallel()
+	if got := run([]string{"add", "myslug", "--root", "rel/path"}, io.Discard, io.Discard); got != 2 {
+		t.Errorf("add --root rel/path = %d, want 2", got)
+	}
+}
+
 func TestValueOr(t *testing.T) {
 	t.Parallel()
 	if valueOr("", "fallback") != "fallback" {

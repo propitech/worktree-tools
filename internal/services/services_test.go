@@ -180,6 +180,42 @@ func TestSetConfigPort(t *testing.T) {
 	}
 }
 
+func TestRepoValueRoundTripAndIsolation(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	const a = "/work/a/property_management/.git"
+	const b = "/work/b/property_management/.git" // same repo name, different clone
+
+	if err := SetRepoValue(a, "WORKTREE_ROOT", "/wt/a"); err != nil {
+		t.Fatalf("SetRepoValue a: %v", err)
+	}
+	if got := RepoValue(a, "WORKTREE_ROOT"); got != "/wt/a" {
+		t.Errorf("RepoValue a = %q, want /wt/a", got)
+	}
+	// A same-named fork (different common dir) must not see a's value.
+	if got := RepoValue(b, "WORKTREE_ROOT"); got != "" {
+		t.Errorf("RepoValue b = %q, want empty (no collision across forks)", got)
+	}
+	if err := SetRepoValue(b, "WORKTREE_ROOT", "/wt/b"); err != nil {
+		t.Fatalf("SetRepoValue b: %v", err)
+	}
+	if got := RepoValue(a, "WORKTREE_ROOT"); got != "/wt/a" {
+		t.Errorf("after b set, RepoValue a = %q, want /wt/a", got)
+	}
+}
+
+func TestRepoKeyDistinctAndStable(t *testing.T) {
+	ka := RepoKey("/work/a/.git", "WORKTREE_ROOT")
+	kb := RepoKey("/work/b/.git", "WORKTREE_ROOT")
+	if ka == kb {
+		t.Errorf("RepoKey collided across common dirs: %q", ka)
+	}
+	// Stable + insensitive to a trailing slash (cleaned before hashing).
+	if RepoKey("/work/a/.git/", "WORKTREE_ROOT") != ka {
+		t.Errorf("RepoKey not stable under trailing slash")
+	}
+}
+
 func TestAppBase(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
